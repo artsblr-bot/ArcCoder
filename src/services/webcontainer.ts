@@ -39,11 +39,11 @@ export async function ensureDir(path: string): Promise<void> {
   await wc.fs.mkdir(path, { recursive: true })
 }
 
-export async function writeFile(path: string, contents: string): Promise<void> {
+export async function writeFile(path: string, contents: string | Uint8Array): Promise<void> {
   const wc = await getContainer()
   const dir = parentDir(path)
   if (dir) await wc.fs.mkdir(dir, { recursive: true })
-  await wc.fs.writeFile(path, contents)
+  await wc.fs.writeFile(path, contents as string)
 }
 
 export async function readFile(path: string): Promise<string> {
@@ -80,7 +80,26 @@ export async function listDir(path: string): Promise<DirEntry[]> {
 
 const IGNORED = new Set(['node_modules', '.git', '.cache', 'dist'])
 
-/** Recursively read the project into a flat { path: contents } map (for export/persistence). */
+// Files we must round-trip as bytes (base64) — reading them as UTF-8 would corrupt them.
+const BINARY_EXT = /\.(png|jpe?g|gif|webp|avif|bmp|ico|icns|woff2?|ttf|otf|eot|mp3|wav|ogg|mp4|webm|mov|pdf|zip|gz|tar|wasm|jar|class|psd|sketch|fig)$/i
+export function isBinaryPath(p: string): boolean {
+  return BINARY_EXT.test(p)
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let bin = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  return btoa(bin)
+}
+export function fromBase64(b64: string): Uint8Array {
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+/** Recursively read the project's TEXT files into a flat { path: contents } map. */
 export async function readProjectFiles(root = ''): Promise<Record<string, string>> {
   const out: Record<string, string> = {}
   const walk = async (dir: string) => {
@@ -88,17 +107,74 @@ export async function readProjectFiles(root = ''): Promise<Record<string, string
     for (const e of entries) {
       if (IGNORED.has(e.name)) continue
       if (e.dir) await walk(e.path)
-      else {
+      else if (!isBinaryPath(e.name)) {
         try {
           out[e.path.replace(/^\//, '')] = await readFile(e.path)
         } catch {
-          /* binary or unreadable — skip */
+          /* unreadable — skip */
         }
       }
     }
   }
   await walk(root)
   return out
+}
+
+/** All file paths in the project (name-only, no reads) — used by Explorer search. */
+export async function listAllFiles(root = ''): Promise<string[]> {
+  const out: string[] = []
+  const walk = async (dir: string) => {
+    const entries = await listDir(dir || '/')
+    for (const e of entries) {
+      if (IGNORED.has(e.name)) continue
+      if (e.dir) await walk(e.path)
+      else out.push(e.path.replace(/^\//, ''))
+    }
+  }
+  await walk(root)
+  return out
+}
+
+export interface ProjectSnapshot {
+  files: Record<string, string> // text
+  binaries: Record<string, string> // base64
+}
+
+/** Full snapshot preserving binary files as base64 (for persistence + ZIP export). */
+export async function readProjectSnapshot(root = ''): Promise<ProjectSnapshot> {
+  const wc = await getContainer()
+  const files: Record<string, string> = {}
+  const binaries: Record<string, string> = {}
+  const walk = async (dir: string) => {
+    const entries = await listDir(dir || '/')
+    for (const e of entries) {
+      if (IGNORED.has(e.name)) continue
+      if (e.dir) await walk(e.path)
+      else {
+        const key = e.path.replace(/^\//, '')
+        try {
+          if (isBinaryPath(e.name)) binaries[key] = toBase64(await wc.fs.readFile(e.path))
+          else files[key] = await readFile(e.path)
+        } catch {
+          /* unreadable — skip */
+        }
+      }
+    }
+  }
+  await walk(root)
+  return { files, binaries }
+}
+
+/** Mount a snapshot, decoding base64 binaries back to bytes. */
+export async function mountSnapshot(snap: ProjectSnapshot): Promise<void> {
+  await mountFiles(snap.files || {})
+  for (const [path, b64] of Object.entries(snap.binaries || {})) {
+    try {
+      await writeFile('/' + path.replace(/^\/+/, ''), fromBase64(b64))
+    } catch {
+      /* skip */
+    }
+  }
 }
 
 // ── Mounting ─────────────────────────────────────────────────────────────────────

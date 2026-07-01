@@ -227,5 +227,63 @@ if (phase === 'i') {
   console.log('  tdapp2 contents:', (files.result || '(none)').replace(/\n/g, ' '))
 }
 
+if (phase === 'k') {
+  console.log('\n=== PHASE K — read_file returns full large files (no truncation loop) ===')
+  const big =
+    '<!doctype html>\n<style>\n' +
+    Array.from({ length: 300 }, (_, i) => `.row-${i} { color: #${(i % 999).toString().padStart(3, '0')}; padding: ${i}px; }`).join('\n') +
+    '\n</style>\n<script>\n' +
+    Array.from({ length: 120 }, (_, i) => `function fn${i}(){ return ${i} * 2 }`).join('\n') +
+    '\n</script>\n<!-- END-MARKER-9137 -->\n'
+  console.log('  file length:', big.length, '(old cap was 8000)')
+  await page.evaluate(async (content) => await window.__arc.executeTool('write_file', { path: 'big.html', content }), big)
+  const rd = await page.evaluate(async () => await window.__arc.executeTool('read_file', { path: 'big.html' }))
+  console.log('  read result length:', rd.result.length)
+  console.log('  sees the JS half (fn119):', rd.result.includes('function fn119'))
+  console.log('  sees the END marker:', rd.result.includes('END-MARKER-9137'))
+}
+
+if (phase === 'l') {
+  console.log('\n=== PHASE L — "make it better" refinement does NOT narration-loop ===')
+  const basic = `<!doctype html><html><head><title>Snake</title></head><body>
+<canvas id="c" width="400" height="400"></canvas>
+<script>
+const cv=document.getElementById('c'),x=cv.getContext('2d');let s=[{x:10,y:10}],f={x:5,y:5},dx=1,dy=0,sc=0;
+function step(){const h={x:s[0].x+dx,y:s[0].y+dy};if(h.x<0||h.x>19||h.y<0||h.y>19){s=[{x:10,y:10}];sc=0;return}s.unshift(h);if(h.x==f.x&&h.y==f.y){sc++;f={x:(Math.random()*20)|0,y:(Math.random()*20)|0}}else s.pop();x.fillStyle='#000';x.fillRect(0,0,400,400);x.fillStyle='#0f0';s.forEach(p=>x.fillRect(p.x*20,p.y*20,18,18));x.fillStyle='#f00';x.fillRect(f.x*20,f.y*20,18,18)}
+document.onkeydown=e=>{if(e.key=='ArrowUp'){dx=0;dy=-1}if(e.key=='ArrowDown'){dx=0;dy=1}if(e.key=='ArrowLeft'){dx=-1;dy=0}if(e.key=='ArrowRight'){dx=1;dy=0}};
+setInterval(step,120);
+</script></body></html>`
+  await page.evaluate(async (c) => await window.__arc.executeTool('write_file', { path: 'index.html', content: c }), basic)
+  const before = basic.length
+  await page.evaluate(() => { const s = window.__arc.store.getState(); s.setOverride('arc3ultra'); s.setEffort('medium') })
+  const t0 = Date.now()
+  // Fire-and-poll: don't await the turn's promise (that would block on protocolTimeout).
+  await page.evaluate(() => {
+    window.__arc.runTurn('Make this snake game much better: smooth movement, a particle burst when eating food, sound effects via WebAudio, a start screen, score + high score, and mobile controls. Keep it a single index.html.')
+    return true
+  })
+  await new Promise((r) => setTimeout(r, 2000))
+  // Poll until the turn finishes (status back to idle/error) or a hard cap.
+  for (let i = 0; i < 100; i++) {
+    const st = await page.evaluate(() => window.__arc.store.getState().status)
+    if (st === 'idle' || st === 'error') break
+    await new Promise((r) => setTimeout(r, 3000))
+  }
+  const elapsed = Math.round((Date.now() - t0) / 1000)
+  const info = await page.evaluate(async () => {
+    const s = window.__arc.store.getState()
+    const tl = s.timeline
+    const tools = tl.filter((t) => t.kind === 'action').map((t) => t.tool)
+    const completed = tools.includes('complete')
+    const content = await window.__arc.executeTool('read_file', { path: 'index.html' })
+    return { status: s.status, items: tl.length, tools, completed, len: content.result.length }
+  })
+  console.log(`  elapsed: ${elapsed}s  (old build hung ~2006s)`)
+  console.log(`  final status: ${info.status}`)
+  console.log(`  tool calls: ${info.tools.join(', ')}`)
+  console.log(`  called complete: ${info.completed}`)
+  console.log(`  index.html: ${before} -> ${info.len} chars`)
+}
+
 await browser.close()
 console.log('done.')

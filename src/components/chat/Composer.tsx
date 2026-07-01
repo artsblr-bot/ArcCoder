@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { Send, Square, Paperclip, X, Hammer, MessageCircleQuestion, ClipboardList, Cpu, Gauge } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Send, Square, Paperclip, X, Hammer, MessageCircleQuestion, ClipboardList, Cpu, Gauge, File as FileIcon } from 'lucide-react'
 import { useArc } from '../../store/arc'
 import { ARC_MODELS } from '../../config/providers'
 import type { ArcModelId } from '../../config/providers'
@@ -7,6 +7,7 @@ import type { AgentMode } from '../../config/prompts'
 import { runTurn, stopTurn } from '../../services/agentLoop'
 import { scheduleSave } from '../../services/persistence'
 import { effortConfig, type EffortLevel } from '../../services/effort'
+import { readFile, readProjectFiles } from '../../services/webcontainer'
 import { Menu, type MenuOption } from '../ui/Menu'
 
 const MODEL_OPTS: MenuOption[] = [
@@ -48,20 +49,84 @@ export function Composer() {
   const effort = useArc((s) => s.effort)
   const setEffort = useArc((s) => s.setEffort)
   const status = useArc((s) => s.status)
+  const treeVersion = useArc((s) => s.treeVersion)
   const running = status === 'thinking' || status === 'working'
   const fileRef = useRef<HTMLInputElement>(null)
+  const taRef = useRef<HTMLTextAreaElement>(null)
+
+  // @-mention state: the file list + the token currently being typed after "@".
+  const [allFiles, setAllFiles] = useState<string[]>([])
+  const [mention, setMention] = useState<{ query: string; start: number; caret: number } | null>(null)
+  const [mIndex, setMIndex] = useState(0)
+
+  useEffect(() => {
+    readProjectFiles()
+      .then((f) => setAllFiles(Object.keys(f)))
+      .catch(() => setAllFiles([]))
+  }, [treeVersion])
+
+  const matches = mention
+    ? allFiles.filter((p) => p.toLowerCase().includes(mention.query.toLowerCase())).slice(0, 8)
+    : []
 
   const setText = (v: string) => {
     setDraft(v)
     scheduleSave() // persist the in-progress draft (debounced)
   }
 
-  const submit = () => {
+  // Detect a "@query" being typed right before the caret so we can offer file matches.
+  const syncMention = (value: string, caret: number) => {
+    const m = value.slice(0, caret).match(/(?:^|\s)@([^\s@]*)$/)
+    if (m) {
+      setMention({ query: m[1], start: caret - m[1].length - 1, caret })
+      setMIndex(0)
+    } else setMention(null)
+  }
+
+  const pickMention = (path: string) => {
+    if (!mention) return
+    // Replace the whole @token (up to its end), not just up to the caret, and drop a
+    // duplicate following space so editing mid-token doesn't leave a dangling tail.
+    const tail = text.slice(mention.caret).match(/^[^\s@]*/)?.[0] ?? ''
+    const tokenEnd = mention.caret + tail.length
+    const insert = `@${path} `
+    let rest = text.slice(tokenEnd)
+    if (rest.startsWith(' ')) rest = rest.slice(1)
+    const next = `${text.slice(0, mention.start)}${insert}${rest}`
+    setText(next)
+    setMention(null)
+    const pos = mention.start + insert.length
+    requestAnimationFrame(() => {
+      taRef.current?.focus()
+      taRef.current?.setSelectionRange(pos, pos)
+    })
+  }
+
+  // Pull the contents of any @-referenced files so the model sees them directly.
+  const expandMentions = async (t: string): Promise<string> => {
+    const paths = Array.from(new Set((t.match(/@([^\s@]+)/g) || []).map((m) => m.slice(1).replace(/[.,;:!?)\]}'"]+$/, ''))))
+    const parts: string[] = []
+    for (const p of paths) {
+      try {
+        const c = await readFile('/' + p.replace(/^\/+/, ''))
+        parts.push(`--- @${p} ---\n${c.slice(0, 12000)}`)
+      } catch {
+        /* not a real file — the model can ignore the token */
+      }
+    }
+    return parts.length ? `Referenced files (contents provided for context):\n\n${parts.join('\n\n')}` : ''
+  }
+
+  const submit = async () => {
     if (!text.trim() || running) return
-    void runTurn(text, images)
+    const message = text
+    const imgs = images
     setDraft('')
     setImages([])
+    setMention(null)
     scheduleSave()
+    const attachments = await expandMentions(message)
+    void runTurn(message, imgs, attachments)
   }
 
   const ModeIcon = MODE_ICON[mode]
@@ -84,18 +149,64 @@ export function Composer() {
         </div>
       )}
 
-      <div className="rounded-xl border border-hairline bg-canvas transition focus-within:border-accent/50">
+      <div className="relative rounded-xl border border-hairline bg-canvas transition focus-within:border-accent/50">
+        {mention && matches.length > 0 && (
+          <div className="absolute bottom-full left-2 z-20 mb-1 w-72 overflow-hidden rounded-lg border border-hairline bg-surface-1 py-1 shadow-xl">
+            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted">Reference a file</div>
+            {matches.map((p, i) => (
+              <button
+                key={p}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  pickMention(p)
+                }}
+                onMouseEnter={() => setMIndex(i)}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] ${i === mIndex ? 'bg-accent-soft text-ink' : 'text-body hover:bg-surface-2'}`}
+              >
+                <FileIcon size={12} className="shrink-0 text-muted" />
+                <span className="truncate">{p}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <textarea
+          ref={taRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value)
+            syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length)
+          }}
+          onClick={(e) => syncMention(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
           onKeyDown={(e) => {
+            if (mention && matches.length > 0) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setMIndex((i) => (i + 1) % matches.length)
+                return
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setMIndex((i) => (i - 1 + matches.length) % matches.length)
+                return
+              }
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault()
+                pickMention(matches[mIndex])
+                return
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                setMention(null)
+                return
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
-              submit()
+              void submit()
             }
           }}
           rows={2}
-          placeholder="Describe what to build, fix, or change…"
+          placeholder="Describe what to build, fix, or change…  Use @ to reference a file."
           className="w-full resize-none bg-transparent px-3.5 py-3 text-[14px] leading-relaxed text-ink outline-none placeholder:text-muted"
         />
         <div className="flex items-center justify-end gap-1.5 px-2 pb-2">
@@ -120,7 +231,7 @@ export function Composer() {
             </button>
           ) : (
             <button
-              onClick={submit}
+              onClick={() => void submit()}
               disabled={!text.trim()}
               className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40"
             >

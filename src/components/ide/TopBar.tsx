@@ -1,9 +1,9 @@
-import { Settings, Download, Search } from 'lucide-react'
+import { Settings, Download, Search, Sun, Moon } from 'lucide-react'
 import JSZip from 'jszip'
 import { ArcMark } from '../ui/ArcMark'
 import { Menu, type MenuOption } from '../ui/Menu'
 import { useArc } from '../../store/arc'
-import { readProjectFiles } from '../../services/webcontainer'
+import { readProjectSnapshot } from '../../services/webcontainer'
 import { saveCurrentProject } from '../../services/persistence'
 
 const EXPORT_OPTS: MenuOption[] = [
@@ -19,12 +19,15 @@ export function TopBar() {
   const setPalette = useArc((s) => s.setPalette)
   const setSettings = useArc((s) => s.setSettings)
   const setView = useArc((s) => s.setView)
+  const theme = useArc((s) => s.theme)
+  const toggleTheme = useArc((s) => s.toggleTheme)
 
   const onExport = async (v: string) => {
     if (v === 'zip') {
-      const files = await readProjectFiles().catch(() => ({}))
+      const { files, binaries } = await readProjectSnapshot().catch(() => ({ files: {}, binaries: {} }))
       const zip = new JSZip()
       for (const [path, content] of Object.entries(files)) zip.file(path, content)
+      for (const [path, b64] of Object.entries(binaries)) zip.file(path, b64, { base64: true })
       const blob = await zip.generateAsync({ type: 'blob' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -85,6 +88,14 @@ export function TopBar() {
           </span>
         }
       />
+
+      <button
+        onClick={toggleTheme}
+        className="rounded-lg border border-hairline p-2 text-body transition hover:border-hairline-strong hover:text-ink"
+        title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+      >
+        {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+      </button>
 
       <button onClick={() => setSettings(true)} className="rounded-lg border border-hairline p-2 text-body transition hover:border-hairline-strong hover:text-ink" title="Settings">
         <Settings size={15} />

@@ -6,6 +6,14 @@ import type { ArcModelId } from '../../config/providers'
 import type { AgentMode } from '../../config/prompts'
 import { EFFORT_ORDER, EFFORTS, type EffortLevel } from '../../services/effort'
 import { listProjects, deleteProject } from '../../services/persistence'
+import { readFile, writeFile } from '../../services/webcontainer'
+
+const FONT_SIZES = [
+  { label: 'S', value: 12 },
+  { label: 'M', value: 13 },
+  { label: 'L', value: 15 },
+  { label: 'XL', value: 17 },
+]
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -38,9 +46,14 @@ export function Settings() {
   const setMode = useArc((s) => s.setMode)
   const override = useArc((s) => s.override)
   const setOverride = useArc((s) => s.setOverride)
+  const theme = useArc((s) => s.theme)
+  const toggleTheme = useArc((s) => s.toggleTheme)
+  const fontSize = useArc((s) => s.fontSize)
+  const setFontSize = useArc((s) => s.setFontSize)
 
   const [token, setToken] = useState('')
   const [projCount, setProjCount] = useState(0)
+  const [cleared, setCleared] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -52,6 +65,36 @@ export function Settings() {
     const ps = await listProjects()
     await Promise.all(ps.map((p) => deleteProject(p.id)))
     setProjCount(0)
+  }
+
+  const clearHistory = () => {
+    useArc.getState().clearTimeline()
+    setCleared(true)
+    setTimeout(() => setCleared(false), 1500)
+  }
+
+  const editRules = async () => {
+    const path = '/Arc.md'
+    try {
+      // Inner: create the file if it doesn't exist. Outer: handle the container being unavailable.
+      try {
+        await readFile(path)
+      } catch {
+        await writeFile(path, '# Project rules\n\nArc follows these guidelines for this project:\n\n- \n')
+      }
+    } catch {
+      useArc.getState().setToast('Could not open project rules — the workspace engine is unavailable here.')
+      return
+    }
+    const s = useArc.getState()
+    s.setView('workspace') // make the editor visible even when opened from the launch screen
+    s.openFile(path)
+    s.bumpTree()
+    setSettings(false)
+  }
+
+  const setTheme = (t: 'dark' | 'light') => {
+    if (theme !== t) toggleTheme()
   }
 
   return (
@@ -80,6 +123,20 @@ export function Settings() {
             </div>
 
             <div className="max-h-[70vh] overflow-auto px-5 py-2">
+              <p className="eyebrow mt-2">Appearance</p>
+              <Row label="Theme">
+                <Seg active={theme === 'dark'} onClick={() => setTheme('dark')}>Dark</Seg>
+                <Seg active={theme === 'light'} onClick={() => setTheme('light')}>Light</Seg>
+              </Row>
+              <Row label="Editor font size">
+                {FONT_SIZES.map((f) => (
+                  <Seg key={f.value} active={fontSize === f.value} onClick={() => setFontSize(f.value)}>
+                    {f.label}
+                  </Seg>
+                ))}
+              </Row>
+
+              <div className="my-2 h-px bg-hairline" />
               <p className="eyebrow mt-2">Defaults</p>
               <Row label="Effort">
                 {EFFORT_ORDER.map((e) => (
@@ -96,9 +153,17 @@ export function Settings() {
                 ))}
               </Row>
               <Row label="Model">
-                <Seg active={override === null} onClick={() => setOverride(null)}>Auto</Seg>
                 <Seg active={override === 'arc3mini'} onClick={() => setOverride('arc3mini' as ArcModelId)}>Arc3Mini</Seg>
                 <Seg active={override === 'arc3ultra'} onClick={() => setOverride('arc3ultra' as ArcModelId)}>Arc3Ultra</Seg>
+              </Row>
+
+              <div className="my-2 h-px bg-hairline" />
+              <p className="eyebrow mt-2">Project</p>
+              <Row label="Project rules (Arc.md)">
+                <Seg active={false} onClick={editRules}>Edit</Seg>
+              </Row>
+              <Row label="Chat history">
+                <Seg active={false} onClick={clearHistory}>{cleared ? 'Cleared ✓' : 'Clear'}</Seg>
               </Row>
 
               <div className="my-2 h-px bg-hairline" />
@@ -121,6 +186,23 @@ export function Settings() {
                   className="w-full rounded-lg border border-hairline bg-surface-1 px-3 py-2 text-[13px] text-ink outline-none focus:border-accent/60"
                 />
                 <p className="mt-1.5 text-[11px] text-muted">Stored locally in your browser. Used only when you push a project to GitHub.</p>
+              </div>
+
+              <div className="my-2 h-px bg-hairline" />
+              <p className="eyebrow mt-2">Shortcuts</p>
+              <div className="py-1 font-mono text-[11.5px] text-muted">
+                {[
+                  ['Command palette', '⌘/Ctrl K'],
+                  ['Send message', 'Enter'],
+                  ['New line', 'Shift Enter'],
+                  ['Reference a file', '@'],
+                  ['Close dialog', 'Esc'],
+                ].map(([label, keys]) => (
+                  <div key={label} className="flex items-center justify-between py-0.5">
+                    <span>{label}</span>
+                    <kbd className="rounded bg-surface-2 px-1.5 py-0.5 text-ink">{keys}</kbd>
+                  </div>
+                ))}
               </div>
 
               <div className="my-2 h-px bg-hairline" />

@@ -29,7 +29,7 @@ export interface ToolDef {
 export interface ToolStreamEvents {
   onText?: (delta: string) => void
   onReasoning?: (delta: string) => void
-  onToolDelta?: (index: number, name: string | undefined, argsFragment: string) => void
+  onToolDelta?: (index: number, name: string | undefined, argsFragment: string, id?: string) => void
 }
 
 export interface ToolStreamResult {
@@ -47,6 +47,8 @@ export interface ArcChatOpts {
   maxTokens?: number
   /** Stream reasoning ("thinking"). Default true for transparency; false for the fast path. */
   reasoning?: boolean
+  /** Force tool use: 'required' makes the model call a tool this turn (breaks narration stalls). */
+  toolChoice?: 'auto' | 'required' | 'none'
   signal?: AbortSignal
 }
 
@@ -199,7 +201,7 @@ export async function streamArcTurn(
   const body = JSON.stringify({
     model: m.model,
     messages,
-    ...(tools.length ? { tools, tool_choice: 'auto' } : {}),
+    ...(tools.length ? { tools, tool_choice: opts.toolChoice ?? 'auto' } : {}),
     ...providerExtras(m, opts.reasoning ?? true),
     temperature: opts.temperature ?? 0.5,
     top_p: opts.top_p ?? 0.9,
@@ -263,7 +265,7 @@ export async function streamArcTurn(
         if (fn?.name) acc.name = fn.name
         const frag = fn?.arguments ?? ''
         if (frag) acc.arguments += frag
-        events.onToolDelta?.(idx, fn?.name, frag)
+        events.onToolDelta?.(idx, fn?.name, frag, acc.id || undefined)
       }
     }
   }

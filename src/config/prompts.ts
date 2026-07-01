@@ -13,15 +13,13 @@ const MODE_RULES: Record<AgentMode, string> = {
 function effortRules(level: EffortLevel): string {
   const e = effortConfig(level)
   if (e.supercode)
-    return [
-      'SUPERCODE: run the full pipeline. (1) Write a short spec with explicit acceptance criteria. (2) Sketch 2-3 candidate approaches and pick the best against the spec. (3) Build it. (4) Run/test and loop fixes until it actually works. (5) Do a final critic pass for edge cases, accessibility, performance, and polish. Be exhaustive and rigorous.',
-    ].join(' ')
+    return 'SUPERCODE — do ALL of this in one continuous flow of tool calls, never as essays: (1) present_plan ONCE with a brief spec + a few acceptance criteria (short — no walls of text, no pasting the plan into chat). (2) Build it now with write_file/edit_file. (3) Start/run it and fix every real problem until it works. (4) A final critic pass — edge cases, accessibility, performance, polish. Then call complete with a one-line summary. Move from step to step by ACTING; never re-describe a step you are about to take.'
   const parts = [`EFFORT ${e.label}.`]
-  if (e.planDepth >= 2) parts.push('Plan thoroughly and research unknowns up front before acting.')
-  else if (e.planDepth === 1) parts.push('Briefly plan before acting.')
+  if (e.planDepth >= 2) parts.push('Think through the approach and unknowns first (in your private reasoning, not as chat messages), then act.')
+  else if (e.planDepth === 1) parts.push('Think briefly, then act.')
   else parts.push('Act directly and concisely; minimal ceremony.')
-  if (e.reviewPasses >= 1) parts.push(`Review and refine your own work ${e.reviewPasses === 1 ? 'once' : `${e.reviewPasses} times`}.`)
-  if (e.verifyLoops >= 1) parts.push('Run/test the result and fix issues before declaring done.')
+  if (e.reviewPasses >= 1) parts.push(`After building, review and fix your own work with tools ${e.reviewPasses === 1 ? 'once' : `${e.reviewPasses} times`}.`)
+  if (e.verifyLoops >= 1) parts.push('Run/test the result and fix issues before you call complete.')
   return parts.join(' ')
 }
 
@@ -30,7 +28,6 @@ export function buildSystemPrompt(opts: {
   mode: AgentMode
   effort: EffortLevel
   projectRules?: string
-  memory?: string
 }): string {
   const label = ARC_MODELS[opts.model].label
   const sections: string[] = []
@@ -94,9 +91,6 @@ export function buildSystemPrompt(opts: {
 
   if (opts.projectRules?.trim()) {
     sections.push(`PROJECT RULES (Arc.md) — follow these for this project:\n${opts.projectRules.trim()}`)
-  }
-  if (opts.memory?.trim()) {
-    sections.push(`MEMORY (durable facts you saved earlier):\n${opts.memory.trim()}`)
   }
 
   return sections.join('\n\n')

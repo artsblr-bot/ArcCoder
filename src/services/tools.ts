@@ -19,9 +19,11 @@ import {
 } from './webcontainer'
 
 // Friendly key tokens the model can use with send_input → real control sequences.
+// Enter is a carriage return (\r): that's what a real terminal sends, and raw-mode
+// TUI menus (clack/inquirer) listen for CR, not the newline a line-reader would accept.
 function decodeKeys(s: string): string {
   return s
-    .replace(/\{enter\}/gi, '\n')
+    .replace(/\{enter\}/gi, '\r')
     .replace(/\{down\}/gi, '\x1b[B')
     .replace(/\{up\}/gi, '\x1b[A')
     .replace(/\{right\}/gi, '\x1b[C')
@@ -38,7 +40,12 @@ function fn(name: string, description: string, props: Record<string, unknown>, r
 }
 
 export const TOOL_DEFS: ToolDef[] = [
-  fn('read_file', 'Read a file to see its current contents before editing.', { path: str('File path, e.g. src/App.tsx') }, ['path']),
+  fn(
+    'read_file',
+    'Read a file to see its current contents before editing. Returns the whole file unless it is very large, in which case it is chunked — pass offset to read the next chunk.',
+    { path: str('File path, e.g. src/App.tsx'), offset: { type: 'number', description: 'Character offset to start from (only needed for very large files; omit to read from the start)' } },
+    ['path'],
+  ),
   fn('list_dir', 'List the files and folders in a directory.', { path: str('Directory path; "/" for the project root') }, ['path']),
   fn('write_file', 'Create a new file or completely overwrite an existing one.', { path: str('File path'), content: str('Full file contents') }, ['path', 'content']),
   fn(
@@ -80,10 +87,27 @@ export const TOOL_DEFS: ToolDef[] = [
   ),
 ]
 
+// Injected into served HTML so the cross-origin preview can talk to Arc: it forwards
+// console output + runtime errors to the parent, and powers click-to-point inspect.
+const INSPECTOR_SNIPPET = `(function(){
+  var P=function(m){try{parent.postMessage(m,'*')}catch(e){}};
+  ['log','warn','error','info'].forEach(function(k){var o=console[k]?console[k].bind(console):function(){};console[k]=function(){o.apply(null,arguments);try{P({source:'arc',kind:'console',level:k,text:Array.prototype.map.call(arguments,function(a){try{return typeof a==='string'?a:JSON.stringify(a)}catch(e){return String(a)}}).join(' ')})}catch(e){}}});
+  window.addEventListener('error',function(e){P({source:'arc',kind:'error',text:(e.message||'Error')+(e.filename?(' @ '+e.filename+':'+e.lineno):'')})});
+  window.addEventListener('unhandledrejection',function(e){P({source:'arc',kind:'error',text:'Unhandled rejection: '+((e.reason&&e.reason.message)||e.reason)})});
+  var inspect=false,last=null;
+  function sel(el){if(!el||el===document.body||el===document.documentElement)return 'body';var s=el.tagName.toLowerCase();if(el.id)return s+'#'+el.id;if(el.className&&typeof el.className==='string'){var parts=el.className.trim().split(' ').filter(Boolean).slice(0,2);if(parts.length)s+='.'+parts.join('.')}return s}
+  window.addEventListener('message',function(e){var d=e.data||{};if(d.source==='arc-host'&&d.kind==='inspect'){inspect=d.on;document.body.style.cursor=inspect?'crosshair':'';if(!inspect&&last){last.style.outline='';last=null}}});
+  document.addEventListener('mouseover',function(e){if(!inspect)return;if(last)last.style.outline='';last=e.target;last.style.outline='2px solid #cc785c';last.style.outlineOffset='-2px'},true);
+  document.addEventListener('click',function(e){if(!inspect)return;e.preventDefault();e.stopPropagation();var t=e.target;if(last){last.style.outline='';last=null}inspect=false;document.body.style.cursor='';P({source:'arc',kind:'pick',selector:sel(t),text:((t.innerText||t.textContent||'')+'').trim().slice(0,80)})},true);
+})();`
+const INJECT_HTML = `<script>${INSPECTOR_SNIPPET}</script>`
+
 // Built-in static server (so a static site previews without the model writing one).
 const STATIC_SERVER = `const http=require('http'),fs=require('fs'),path=require('path');
+const INJ=${JSON.stringify(INJECT_HTML)};
 const T={'.html':'text/html','.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.json':'application/json','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.ico':'image/x-icon','.webp':'image/webp','.woff2':'font/woff2'};
-http.createServer((req,res)=>{let p=decodeURIComponent((req.url||'/').split('?')[0]);if(p==='/')p='/index.html';const fp=path.join(process.cwd(),p);fs.readFile(fp,(e,d)=>{if(e){fs.readFile(path.join(process.cwd(),'index.html'),(e2,d2)=>{if(e2){res.writeHead(404);res.end('Not found')}else{res.writeHead(200,{'content-type':'text/html'});res.end(d2)}})}else{res.writeHead(200,{'content-type':T[path.extname(fp).toLowerCase()]||'application/octet-stream'});res.end(d)}})}).listen(3000,()=>console.log('Arc static server running on http://localhost:3000'));`
+function sendHtml(res,d){res.writeHead(200,{'content-type':'text/html'});res.end(d.toString()+INJ)}
+http.createServer((req,res)=>{let p=decodeURIComponent((req.url||'/').split('?')[0]);if(p==='/')p='/index.html';const fp=path.join(process.cwd(),p);fs.readFile(fp,(e,d)=>{if(e){fs.readFile(path.join(process.cwd(),'index.html'),(e2,d2)=>{if(e2){res.writeHead(404);res.end('Not found')}else{sendHtml(res,d2)}})}else{const ct=T[path.extname(fp).toLowerCase()]||'application/octet-stream';if(ct==='text/html'){sendHtml(res,d)}else{res.writeHead(200,{'content-type':ct});res.end(d)}}})}).listen(3000,()=>console.log('Arc static server running on http://localhost:3000'));`
 
 // ── Loop-facing helpers ───────────────────────────────────────────────────────────
 const NO_CARD = new Set(['present_plan', 'update_tasks', 'ask_user'])
@@ -179,7 +203,18 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
         const p = norm(args.path as string)
         const content = await readFile(p)
         s.openFile(p)
-        return { result: content.slice(0, 8000), detail: content.slice(0, 4000), ok: true }
+        // Return the WHOLE file unless it's very large. Silently truncating (the old
+        // 8000-char cap) made the model think big files were "corrupted" and it would
+        // rewrite them in a loop. Now truncation is explicit and paginated via offset.
+        const CAP = 60000
+        const offset = Math.max(0, Math.floor(Number(args.offset) || 0))
+        const slice = content.slice(offset, offset + CAP)
+        const end = offset + slice.length
+        const truncated = offset > 0 || end < content.length
+        const result = truncated
+          ? `[${p} — showing chars ${offset}–${end} of ${content.length}.${end < content.length ? ` Call read_file with offset ${end} for the rest.` : ''}]\n${slice}`
+          : slice
+        return { result, detail: content.slice(0, 8000), ok: true }
       }
       case 'list_dir': {
         const p = (args.path as string) || '/'
@@ -190,6 +225,7 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       case 'write_file': {
         const p = norm(args.path as string)
         const content = String(args.content ?? '')
+        s.captureBaseline(p, await readFile(p).catch(() => '')) // '' ⇒ brand-new file
         await writeFile(p, content)
         s.bumpTree()
         s.markTouched(p)
@@ -204,6 +240,7 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
         if (!search || !content.includes(search)) {
           return { result: `Could not find the search text in ${p}. Re-read the file and try again.`, ok: false }
         }
+        s.captureBaseline(p, content)
         const next = content.replace(search, replace)
         await writeFile(p, next)
         s.bumpTree()
@@ -264,6 +301,7 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       case 'start_dev_server': {
         ensureServerListener()
         let command = String(args.command ?? '').trim()
+        let injected = false // true only when Arc's static server serves it (console + inspect work)
         if (!command) {
           // Auto-detect: a package.json dev script, else serve the static files directly.
           let hasDev = false
@@ -278,8 +316,10 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
           } else {
             await writeFile('/.arc-static-server.cjs', STATIC_SERVER)
             command = 'node .arc-static-server.cjs'
+            injected = true
           }
         }
+        s.setPreviewInjected(injected)
         termWrite(`\r\n\x1b[38;2;204;120;92m⚡ arc \x1b[0m${command}\r\n`)
         const proc = await spawnProcess('jsh', ['-c', command])
         void proc.output.pipeTo(new WritableStream<string>({ write: (c) => termWrite(c) })).catch(() => {})

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Check, Circle, HelpCircle } from 'lucide-react'
+import { Check, Circle, HelpCircle, ArrowDown } from 'lucide-react'
 import { useArc } from '../../store/arc'
 import { ARC_MODELS } from '../../config/providers'
 import { Timeline } from './Timeline'
@@ -40,6 +40,15 @@ function AltCycler() {
   )
 }
 
+function fmtDur(s: number): string {
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}h ${m}m ${sec}s`
+  if (m > 0) return `${m}m ${sec}s`
+  return `${sec}s`
+}
+
 function ThinkingIndicator() {
   const status = useArc((s) => s.status)
   const pending = useArc((s) => s.pendingQuestion)
@@ -62,7 +71,7 @@ function ThinkingIndicator() {
       <div className="flex items-center gap-2.5">
         <Spinner />
         <span className="text-[13px] text-body">Arc is {status === 'working' ? 'Working' : 'Thinking'}</span>
-        {sec > 2 && <span className="ml-auto font-mono text-[11px] text-muted">{sec}s</span>}
+        {sec > 2 && <span className="ml-auto font-mono text-[11px] text-muted">{fmtDur(sec)}</span>}
       </div>
       <div className="mt-1.5 pl-[26px] text-[12px]">
         <AltCycler />
@@ -193,15 +202,43 @@ function ContextBar() {
 export function AgentPanel() {
   const ref = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Only follow new content when the user is already at the bottom, so scrolling up
+  // to re-read something isn't yanked back down on every streamed token.
+  const stickRef = useRef(true)
+  const [showJump, setShowJump] = useState(false)
   const timeline = useArc((s) => s.timeline)
 
   useEffect(() => {
     registerPanel('agent', ref.current)
     return () => registerPanel('agent', null)
   }, [])
+
+  const onScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    stickRef.current = nearBottom
+    setShowJump(!nearBottom)
+  }
+
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+    // Sending a message is an explicit intent to see the reply — always follow it down.
+    const last = timeline[timeline.length - 1]
+    if (last?.kind === 'user') {
+      stickRef.current = true
+      setShowJump(false)
+    }
+    if (stickRef.current && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
   }, [timeline])
+
+  const jumpToBottom = () => {
+    const el = scrollRef.current
+    if (!el) return
+    // Instant (not smooth) so onScroll doesn't fight the animation and re-show the button.
+    el.scrollTop = el.scrollHeight
+    stickRef.current = true
+    setShowJump(false)
+  }
 
   return (
     <div ref={ref} className="flex h-full min-h-0 flex-col bg-surface-1">
@@ -210,10 +247,20 @@ export function AgentPanel() {
         <StatusPill />
       </header>
       <Tasks />
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto px-3.5 py-4">
-        <Timeline />
-        <QuestionCard />
-        <ThinkingIndicator />
+      <div className="relative min-h-0 flex-1">
+        <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto px-3.5 py-4">
+          <Timeline />
+          <QuestionCard />
+          <ThinkingIndicator />
+        </div>
+        {showJump && (
+          <button
+            onClick={jumpToBottom}
+            className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-hairline bg-surface-2/95 px-3 py-1.5 text-[12px] text-body shadow-md backdrop-blur transition hover:text-ink"
+          >
+            <ArrowDown size={13} /> Jump to latest
+          </button>
+        )}
       </div>
       <ContextBar />
       <Composer />

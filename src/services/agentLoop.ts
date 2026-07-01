@@ -2,7 +2,7 @@ import { useArc } from '../store/arc'
 import { routeModel } from './router'
 import { streamArcTurn, chatArc, userMessageFor, isAbort, type ToolMsg } from './arcChat'
 import { buildSystemPrompt } from '../config/prompts'
-import { effortConfig, type EffortConfig } from './effort'
+import { effortConfig, type EffortConfig, type EffortLevel } from './effort'
 import { scrubIdentity } from './sanitize'
 import { TOOL_DEFS, executeTool, parseArgs, titleFor, arcyFor, showsCard } from './tools'
 import { scheduleSave } from './persistence'
@@ -46,7 +46,41 @@ async function revealFile(path: string, content: string, signal: AbortSignal): P
   set(path, content)
 }
 
-const MAX_ITERS = 26
+// Build a live title/detail from a (possibly unfinished) streamed tool-args string,
+// so the chat action card fills in word-by-word as the model types the call.
+function liveTitle(name: string, args: string): string {
+  return titleFor(name, {
+    path: partialField(args, 'path') ?? undefined,
+    from: partialField(args, 'from') ?? undefined,
+    to: partialField(args, 'to') ?? undefined,
+    command: partialField(args, 'command') ?? undefined,
+  } as Record<string, unknown>)
+}
+function liveDetail(name: string, args: string): string | null {
+  switch (name) {
+    case 'edit_file':
+      return `- ${partialField(args, 'search') ?? ''}\n+ ${partialField(args, 'replace') ?? ''}`
+    case 'run_command':
+      return partialField(args, 'command')
+    case 'web_search':
+    case 'deep_research':
+      return partialField(args, 'query')
+    default:
+      return null // write_file mirrors the live editor stream; others have no body
+  }
+}
+
+// One continuous tool loop per turn. The budget scales with effort — NOT by running
+// multiple sub-loops (that used to multiply narration stalls into minutes-long hangs).
+function iterBudgetFor(eff: EffortConfig): number {
+  const budgets: Record<EffortLevel, number> = { low: 12, medium: 18, high: 26, max: 34, supercode: 44 }
+  return budgets[eff.level]
+}
+
+// Shown to the model after a prose-only turn in Build mode: nothing happened, so act.
+const STALL_NUDGE =
+  'That reply did nothing — you wrote text but called no tool. Act now with a tool call: write_file / edit_file / run_command / start_dev_server to make real progress, or call `complete` if the whole task is truly finished. Do not reply with prose again.'
+
 let controller: AbortController | null = null
 
 // The full model thread (system + every user/assistant/tool message), kept across
@@ -142,103 +176,159 @@ function buildHistory(): ToolMsg[] {
   return msgs.slice(-16)
 }
 
-/** Run stream→tool iterations on `messages` until the model stops calling tools. */
-async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortConfig, signal: AbortSignal): Promise<void> {
-  for (let iter = 0; iter < MAX_ITERS; iter++) {
+type StepOutcome = 'complete' | 'answered' | 'stalled' | 'budget'
+
+/**
+ * One continuous agent loop. Streams a turn, executes its tool calls, repeats.
+ * A prose-only turn in Build mode means the model narrated instead of acting: we nudge
+ * once and FORCE a tool call on the retry (do work, or call `complete`). If it still
+ * won't act, we stop rather than loop forever.
+ */
+async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortConfig, signal: AbortSignal, iterBudget: number): Promise<StepOutcome> {
+  const buildMode = useArc.getState().mode === 'build'
+  const tools = useArc.getState().mode === 'ask' ? [] : TOOL_DEFS
+  let stalls = 0
+  let forceTools = false
+  let lastText = ''
+
+  for (let iter = 0; iter < iterBudget; iter++) {
     if (signal.aborted) throw new DOMException('aborted', 'AbortError')
-    const reasoningId = useArc.getState().pushTimeline({ kind: 'reasoning', text: '' })
-    const assistantId = useArc.getState().pushTimeline({ kind: 'assistant', text: '' })
-    // Accumulate raw deltas and render the scrubbed buffer, so a hidden-provider name
-    // is never visible even for a frame while streaming.
+
+    // Timeline items are created lazily — only when text/reasoning actually streams —
+    // so prose-free tool turns don't leave empty "Thinking" bubbles behind.
+    let reasoningId: string | undefined
+    let assistantId: string | undefined
     let rawReason = ''
     let rawText = ''
+    const argBuf = new Map<number, { name: string; args: string; cardId?: string; id?: string }>()
 
-    const argBuf = new Map<number, { name: string; args: string }>()
-    const res = await streamArcTurn(
-      model,
-      messages,
-      useArc.getState().mode === 'ask' ? [] : TOOL_DEFS,
-      {
-        onReasoning: (d) => {
-          rawReason += d
-          useArc.getState().updateTimeline(reasoningId, { text: scrubIdentity(rawReason) })
-        },
-        onText: (d) => {
-          rawText += d
-          useArc.getState().updateTimeline(assistantId, { text: scrubIdentity(rawText) })
-        },
-        // Stream a file into the editor live as Arc "types" its write_file content.
-        onToolDelta: (index, name, frag) => {
-          const e = argBuf.get(index) ?? { name: '', args: '' }
-          if (name) e.name = name
-          e.args += frag
-          argBuf.set(index, e)
-          if (e.name === 'write_file') {
-            const path = partialField(e.args, 'path')
-            if (path) useArc.getState().setStreamFile('/' + path.replace(/^\/+/, ''), partialField(e.args, 'content') ?? '')
-          }
-        },
+    const events = {
+      onReasoning: (d: string) => {
+        rawReason += d
+        if (!reasoningId) reasoningId = useArc.getState().pushTimeline({ kind: 'reasoning', text: '' })
+        useArc.getState().updateTimeline(reasoningId, { text: scrubIdentity(rawReason) })
       },
-      { reasoning: eff.reasoning, maxTokens: eff.maxTokens, signal },
-    )
-
-    const st = useArc.getState()
-    st.updateTimeline(reasoningId, { text: scrubIdentity(res.reasoning), done: true })
-    st.updateTimeline(assistantId, { text: scrubIdentity(res.text) })
-    st.addContext(estimateTokens(res.text) + estimateTokens(res.reasoning))
-
-    if (res.toolCalls.length === 0) {
-      // In Build mode the only way to finish is the `complete` tool — nudge until then.
-      if (useArc.getState().mode === 'build' && iter < MAX_ITERS - 1) {
-        messages.push({
-          role: 'user',
-          content:
-            "You stopped without finishing. Keep going — use your tools to actually do the work now. Only when the ENTIRE task is built and verified, call the `complete` tool. Do not reply with prose alone.",
-        })
-        continue
-      }
-      return
+      onText: (d: string) => {
+        rawText += d
+        if (!assistantId) assistantId = useArc.getState().pushTimeline({ kind: 'assistant', text: '' })
+        useArc.getState().updateTimeline(assistantId, { text: scrubIdentity(rawText) })
+      },
+      // As Arc "types" a tool call, show it live in the chat: an action card appears
+      // immediately and its body (file content, command, query) fills in word-by-word.
+      onToolDelta: (index: number, name: string | undefined, frag: string, id?: string) => {
+        const e = argBuf.get(index) ?? { name: '', args: '' }
+        if (name) e.name = name
+        if (id) e.id = id
+        e.args += frag
+        argBuf.set(index, e)
+        const st = useArc.getState()
+        if (e.name && showsCard(e.name) && e.name !== 'complete') {
+          const path = e.name === 'write_file' ? partialField(e.args, 'path') : null
+          const np = path ? '/' + path.replace(/^\/+/, '') : undefined
+          if (!e.cardId) {
+            e.cardId = st.pushTimeline({ kind: 'action', tool: e.name, title: liveTitle(e.name, e.args), status: 'running', path: np })
+            argBuf.set(index, e)
+          } else {
+            st.updateTimeline(e.cardId, { title: liveTitle(e.name, e.args), ...(np ? { path: np } : {}), detail: liveDetail(e.name, e.args) ?? undefined })
+          }
+        }
+        if (e.name === 'write_file') {
+          const path = partialField(e.args, 'path')
+          if (path) st.setStreamFile('/' + path.replace(/^\/+/, ''), partialField(e.args, 'content') ?? '')
+        }
+      },
     }
 
+    // Forcing tools (tool_choice:'required') breaks narration stalls; if a provider
+    // rejects it, fall back to 'auto' so we never surface a spurious error.
+    let res
+    try {
+      res = await streamArcTurn(model, messages, tools, events, { reasoning: eff.reasoning, maxTokens: eff.maxTokens, toolChoice: forceTools ? 'required' : 'auto', signal })
+    } catch (e) {
+      if (forceTools && !isAbort(e)) res = await streamArcTurn(model, messages, tools, events, { reasoning: eff.reasoning, maxTokens: eff.maxTokens, signal })
+      else throw e
+    }
+    forceTools = false
+
+    const st = useArc.getState()
+    if (reasoningId) st.updateTimeline(reasoningId, { text: scrubIdentity(res.reasoning), done: true })
+    if (assistantId) st.updateTimeline(assistantId, { text: scrubIdentity(res.text) })
+    st.addContext(estimateTokens(res.text) + estimateTokens(res.reasoning))
+
+    // Any card we started rendering for a tool call that didn't survive (e.g. a large
+    // write_file truncated by the token limit) must be resolved, never left spinning.
+    const sweepOrphans = (resolved?: Set<string>) => {
+      for (const e of argBuf.values()) {
+        if (e.cardId && (!resolved || !resolved.has(e.cardId))) useArc.getState().updateTimeline(e.cardId, { status: 'error' })
+      }
+    }
+
+    if (res.toolCalls.length === 0) {
+      sweepOrphans()
+      useArc.getState().clearStreamFile()
+      if (!buildMode) return 'answered' // Ask/Plan: a prose reply IS the deliverable.
+      // Build mode: prose-only accomplished nothing. Nudge + force a tool on the retry.
+      const repeat = !!res.text.trim() && res.text.trim() === lastText
+      lastText = res.text.trim()
+      stalls++
+      if (stalls >= 2 || repeat) return 'stalled' // already forced once (or looping) — stop, don't hang.
+      messages.push({ role: 'user', content: STALL_NUDGE })
+      forceTools = true
+      continue
+    }
+
+    stalls = 0
+    lastText = ''
     messages.push({ role: 'assistant', content: res.text || null, tool_calls: res.toolCalls })
     st.setStatus('working')
     const isComplete = res.toolCalls.some((tc) => tc.function.name === 'complete')
+    // Match streamed cards to surviving calls by tool_call id (robust to dropped calls
+    // shifting positions); fall back to positional index when ids are absent.
+    const byId = new Map<string, { cardId?: string }>()
+    for (const e of argBuf.values()) if (e.id) byId.set(e.id, e)
+    const resolved = new Set<string>()
 
-    for (const tc of res.toolCalls) {
+    for (let ci = 0; ci < res.toolCalls.length; ci++) {
+      const tc = res.toolCalls[ci]
       if (signal.aborted) throw new DOMException('aborted', 'AbortError')
       const name = tc.function.name
       const args = parseArgs(tc.function.arguments)
       const a = arcyFor(name)
       useArc.getState().setArcy(a.activity, a.target)
-      let cardId: string | undefined
-      if (showsCard(name)) cardId = useArc.getState().pushTimeline({ kind: 'action', tool: name, title: titleFor(name, args), status: 'running' })
-      // Word-by-word reveal of the file, unless the live stream already typed it out.
-      if (name === 'write_file' && typeof args.content === 'string') {
-        const np = '/' + String(args.path ?? '').replace(/^\/+/, '')
+      let cardId = (tc.id && byId.get(tc.id)?.cardId) || argBuf.get(ci)?.cardId
+      const np = name === 'write_file' ? '/' + String(args.path ?? '').replace(/^\/+/, '') : undefined
+      if (showsCard(name)) {
+        if (cardId) useArc.getState().updateTimeline(cardId, { title: titleFor(name, args), status: 'running', ...(np ? { path: np } : {}) })
+        else cardId = useArc.getState().pushTimeline({ kind: 'action', tool: name, title: titleFor(name, args), status: 'running', path: np })
+      } else {
+        cardId = undefined
+      }
+      if (name === 'write_file' && typeof args.content === 'string' && np && np !== '/') {
         const cur = useArc.getState().streamFile
-        if (np !== '/' && (!cur || cur.path !== np || cur.content.length < args.content.length)) {
+        if (!cur || cur.path !== np || cur.content.length < args.content.length) {
           await revealFile(np, args.content, signal)
         }
       }
       const out = await executeTool(name, args)
-      if (cardId) useArc.getState().updateTimeline(cardId, { status: out.ok ? 'done' : 'error', detail: out.detail })
+      if (cardId) {
+        useArc.getState().updateTimeline(cardId, { status: out.ok ? 'done' : 'error', detail: out.detail })
+        resolved.add(cardId)
+      }
       messages.push({ role: 'tool', tool_call_id: tc.id, name, content: out.result.slice(0, 6000) })
     }
+    sweepOrphans(resolved)
     useArc.getState().clearStreamFile()
-    if (isComplete) return
+    if (isComplete) return 'complete'
   }
+  return 'budget'
 }
 
-const SUPERCODE_STAGES = [
-  'SUPERCODE · stage 1 — SPEC: Write a short, concrete spec with explicit, checkable acceptance criteria for this task. Call present_plan to show it.',
-  'SUPERCODE · stage 2 — BUILD: Implement the solution to that spec. Create every file you need and run what you need to.',
-  'SUPERCODE · stage 3 — VERIFY: Run and test it. Fix every problem until it genuinely works and satisfies each acceptance criterion.',
-  'SUPERCODE · stage 4 — CRITIC: Final hardening pass — edge cases, accessibility, performance, and polish. Fix what you find, then give a short summary of what you built.',
-]
-
-export async function runTurn(userText: string, images: string[] = []): Promise<void> {
+export async function runTurn(userText: string, images: string[] = [], attachments = ''): Promise<void> {
   const store = useArc.getState()
   if (isRunning() || !userText.trim()) return
+  store.resetBaselines() // diff gutters reflect what changes in THIS turn
+  // Extra context (e.g. @-referenced file contents) goes to the model but not the visible message.
+  const modelText = attachments ? `${userText}\n\n${attachments}` : userText
 
   const route = routeModel({ text: userText, hasImage: images.length > 0, effort: store.effort, override: store.override, prev: store.model })
   if (route.model !== store.model) store.setModel(route.model)
@@ -256,8 +346,8 @@ export async function runTurn(userText: string, images: string[] = []): Promise<
   const projectRules = await readFile('/Arc.md').catch(() => readFile('/ARC.md').catch(() => ''))
   const sys = buildSystemPrompt({ model: route.model, mode: store.mode, effort: store.effort, projectRules })
   const userContent: ToolMsg['content'] = images.length
-    ? [{ type: 'text', text: userText }, ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
-    : userText
+    ? [{ type: 'text', text: modelText }, ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
+    : modelText
 
   // Persistent thread: seed from prior timeline on first turn, refresh the system prompt each turn.
   if (!conversation) conversation = [{ role: 'system', content: sys }, ...buildHistory()]
@@ -271,22 +361,10 @@ export async function runTurn(userText: string, images: string[] = []): Promise<
   const signal = controller.signal
 
   try {
-    if (eff.supercode) {
-      for (const directive of SUPERCODE_STAGES) {
-        messages.push({ role: 'user', content: directive })
-        await agentSteps(messages, route.model, eff, signal)
-      }
-    } else {
-      await agentSteps(messages, route.model, eff, signal)
-      for (let r = 0; r < eff.reviewPasses; r++) {
-        messages.push({ role: 'user', content: 'Review what you just did for bugs, edge cases, and polish. Fix anything wrong with your tools. If it is already correct, say so briefly.' })
-        await agentSteps(messages, route.model, eff, signal)
-      }
-      if (eff.verifyLoops > 0) {
-        messages.push({ role: 'user', content: 'Run or test the result and fix any errors until it works. If there is nothing to run, double-check the code is correct.' })
-        await agentSteps(messages, route.model, eff, signal)
-      }
-    }
+    // Single continuous loop. Effort shapes the SYSTEM PROMPT (how thorough — spec,
+    // self-review, verification, SUPERCODE critic pass) and the iteration budget —
+    // never extra sub-loops, which used to multiply narration stalls into long hangs.
+    await agentSteps(messages, route.model, eff, signal, iterBudgetFor(eff))
 
     const st = useArc.getState()
     st.setStatus('idle')
@@ -307,6 +385,8 @@ export async function runTurn(userText: string, images: string[] = []): Promise<
     controller = null
     useArc.getState().setBoost(false)
     useArc.getState().clearStreamFile()
+    // Stop / a mid-stream error can leave action cards mid-flight — never leave a spinner.
+    useArc.getState().finishRunningCards()
     trimConversation()
     scheduleSave()
   }

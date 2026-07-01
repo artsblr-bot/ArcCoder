@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Brain, Check, Loader2, AlertTriangle, FileEdit, TerminalSquare, Search, ListChecks, Sparkles, ChevronRight, Wrench } from 'lucide-react'
 import { useArc, type TimelineItem } from '../../store/arc'
@@ -46,19 +46,44 @@ function Reasoning({ item }: { item: Extract<TimelineItem, { kind: 'reasoning' }
 
 function ActionCard({ item }: { item: Extract<TimelineItem, { kind: 'action' }> }) {
   const [open, setOpen] = useState(false)
+  const streamFile = useArc((s) => s.streamFile)
+  const bodyRef = useRef<HTMLPreElement>(null)
   const Icon = toolIcon(item.tool)
+  const running = item.status === 'running'
+
+  // While the call is streaming/executing, show its body live: a file write mirrors
+  // the editor's word-by-word stream; other tools show their command/query as it types.
+  const live =
+    running && item.tool === 'write_file' && item.path && streamFile?.path === item.path
+      ? streamFile.content
+      : running && item.detail
+        ? item.detail
+        : null
+
+  // Keep the newest text in view as it types out.
+  useEffect(() => {
+    if (live != null && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [live])
+
+  const hasDetail = !!item.detail || live != null
   return (
     <div className="w-full rounded-lg border border-hairline bg-surface-2/60">
-      <button onClick={() => item.detail && setOpen((o) => !o)} className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px]">
+      <button onClick={() => hasDetail && setOpen((o) => !o)} className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px]">
         <Icon size={14} className="shrink-0 text-accent" />
         <span className="flex-1 truncate text-body">{item.title}</span>
         {item.status === 'running' && <Loader2 size={13} className="animate-spin text-muted" />}
         {item.status === 'done' && <Check size={13} className="text-success" />}
         {item.status === 'error' && <AlertTriangle size={13} className="text-danger" />}
-        {item.detail && <ChevronRight size={13} className={`text-muted transition ${open ? 'rotate-90' : ''}`} />}
+        {hasDetail && !live && <ChevronRight size={13} className={`text-muted transition ${open ? 'rotate-90' : ''}`} />}
       </button>
       {item.status === 'running' && <div className="arc-shimmer h-0.5 w-full" />}
-      {open && item.detail && (
+      {live != null && live !== '' && (
+        <pre ref={bodyRef} className="max-h-56 overflow-auto border-t border-hairline px-3 py-2 font-mono text-[11px] leading-relaxed text-body">
+          {live}
+          <span className="arc-blink text-accent">▌</span>
+        </pre>
+      )}
+      {open && item.detail && live == null && (
         <pre className="max-h-56 overflow-auto border-t border-hairline px-3 py-2 font-mono text-[11px] leading-relaxed text-muted">{item.detail}</pre>
       )}
       {item.status === 'error' && (

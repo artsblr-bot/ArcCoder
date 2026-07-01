@@ -170,6 +170,14 @@
   animation: arc-blink 1.05s steps(1) infinite;
 }
 
+/* Diff gutter — a thin accent bar on lines Arc added or changed this turn. */
+.arc-diff-line {
+  background: var(--accent);
+  width: 3px !important;
+  margin-left: 4px;
+  border-radius: 2px;
+}
+
 /* SUPERCODE boost — animated spectrum (the one place the palette goes loud). */
 .arc-spectrum {
   background-image: linear-gradient(90deg, #cc785c, #e8a55a, #5db8a6, #a78bdc, #cc785c);
