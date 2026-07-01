@@ -181,6 +181,29 @@ export interface ToolOutcome {
 function norm(path: string): string {
   return '/' + String(path).replace(/^\/+/, '')
 }
+function parentOf(p: string): string {
+  return p.replace(/\/[^/]*$/, '') || '/'
+}
+
+// ── Quality gates (Claude-Code style: understand before you change) ───────────────
+// The model must READ a file before editing it, and LIST a directory before creating
+// new files in it. These are per-project (reset when a project is opened/created).
+const readFiles = new Set<string>()
+const listedDirs = new Set<string>()
+export function resetToolMemory(): void {
+  readFiles.clear()
+  listedDirs.clear()
+}
+/** True if any existing ancestor directory of `p` has been listed this session. */
+function listedAncestor(p: string): boolean {
+  const parts = p.split('/').filter(Boolean)
+  parts.pop() // drop the filename
+  for (let i = parts.length; i >= 0; i--) {
+    const dir = i === 0 ? '/' : '/' + parts.slice(0, i).join('/')
+    if (listedDirs.has(dir)) return true
+  }
+  return false
+}
 
 let serverListenerSet = false
 function ensureServerListener() {
@@ -202,6 +225,7 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       case 'read_file': {
         const p = norm(args.path as string)
         const content = await readFile(p)
+        readFiles.add(p) // now safe to edit
         s.openFile(p)
         // Return the WHOLE file unless it's very large. Silently truncating (the old
         // 8000-char cap) made the model think big files were "corrupted" and it would
@@ -218,15 +242,23 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       }
       case 'list_dir': {
         const p = (args.path as string) || '/'
-        const entries = await listDir(p === '/' ? '/' : norm(p))
+        const dir = p === '/' ? '/' : norm(p)
+        const entries = await listDir(dir)
+        listedDirs.add(dir) // now safe to create files here
         const list = entries.map((e) => (e.dir ? `${e.name}/` : e.name)).join('\n')
         return { result: list || '(empty)', detail: list, ok: true }
       }
       case 'write_file': {
         const p = norm(args.path as string)
         const content = String(args.content ?? '')
-        s.captureBaseline(p, await readFile(p).catch(() => '')) // '' ⇒ brand-new file
+        const prev = await readFile(p).then((c) => c as string | null).catch(() => null)
+        // Gate: inspect the directory before creating a NEW file (avoid duplicating/clobbering).
+        if (prev === null && !listedAncestor(p)) {
+          return { result: `Before creating ${p}, inspect where it goes: call list_dir on ${parentOf(p)} (or "/") first so you don't duplicate or overwrite an existing file. Then write it.`, ok: false }
+        }
+        s.captureBaseline(p, prev ?? '') // null ⇒ brand-new file
         await writeFile(p, content)
+        readFiles.add(p) // the model authored it — safe to edit later
         s.bumpTree()
         s.markTouched(p)
         s.openFile(p)
@@ -236,6 +268,10 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
         const p = norm(args.path as string)
         const search = String(args.search ?? '')
         const replace = String(args.replace ?? '')
+        // Gate: you must read a file before editing it, so your search text is exact.
+        if (!readFiles.has(p)) {
+          return { result: `Read ${p} with read_file before editing it — that way your search text matches the real contents exactly.`, ok: false }
+        }
         const content = await readFile(p)
         if (!search || !content.includes(search)) {
           return { result: `Could not find the search text in ${p}. Re-read the file and try again.`, ok: false }

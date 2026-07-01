@@ -3,6 +3,19 @@ import { effortConfig, type EffortLevel } from '../services/effort'
 
 export type AgentMode = 'build' | 'ask' | 'plan'
 
+// Always-on design direction — Arc should design with a distinctive point of view,
+// never templated defaults. Applied whenever Arc might build or change UI.
+const DESIGN_GUIDE = `DESIGN (apply to every UI you build — Arc's work should never look templated or AI-generated):
+- Have a point of view. Ground the design in the subject: name the product, its audience, and the page's one job, and let its world (materials, vocabulary, mood) drive the palette, type, and layout. Generic beauty is a fail; specific is the goal.
+- Typography carries the personality. Deliberately pair a characterful display face with a clean body face (and a mono for data/code) — not the same fonts you'd reach for on any page. Set a real type scale with intentional weight, width, and spacing.
+- The hero is a thesis. Open with the most characteristic thing in the subject's world (a headline, an image, a live demo, a motion moment) — not the default big-number-stat block.
+- Structure is information. Use eyebrows, dividers, and numbers only when they encode something true (e.g. 01/02/03 only for a real sequence). Don't decorate.
+- Motion, deliberately. One orchestrated moment (a load reveal, a scroll trigger, a hover micro-interaction) beats scattered effects. Always honor prefers-reduced-motion.
+- Spend boldness in ONE place. Pick a single signature element to be memorable; keep everything around it quiet and disciplined. Before "shipping", remove one unneeded flourish.
+- AVOID the AI-default looks unless the brief explicitly asks for one: (1) cream background + high-contrast serif + terracotta accent; (2) near-black background + a single acid-green/vermilion accent; (3) broadsheet hairline rules with zero border-radius and dense columns.
+- Copy is design material. Active voice, sentence case, name things by what the user controls; errors say what happened and how to fix it (never apologize or stay vague); empty states invite action. Write real, specific copy — never lorem ipsum or placeholder text.
+- Quality floor, always: responsive down to mobile, visible keyboard focus, real color contrast. Use real, working images (e.g. Unsplash URLs) rather than broken placeholders.`
+
 const MODE_RULES: Record<AgentMode, string> = {
   build:
     'BUILD mode: create/edit/delete files and run terminal commands to accomplish the task, then verify by running it. Keep working until EVERYTHING the user asked for is done — and only then call the `complete` tool to finish your turn. Do not stop with prose alone while work remains: if you reply without calling a tool, you will be told to continue. When the request is unclear, call ask_user instead of guessing.',
@@ -54,6 +67,16 @@ export function buildSystemPrompt(opts: {
   )
 
   sections.push(
+    `HOW YOU WORK — discipline (this is enforced by the tools, not optional):
+- ALWAYS read a file with read_file before you edit it. edit_file is rejected until you have read that file, so its search text matches the real contents. Never edit blind.
+- ALWAYS list the directory with list_dir before you create a new file — every time, even if you think you already know what's there. write_file for a new file is rejected until you've inspected where it goes, so you don't duplicate or clobber existing files.
+- Understand before you change: inspect the relevant files/dirs first, then make the change.
+- Each turn that has work left MUST contain at least one tool call. A reply that is only prose does nothing and wastes the user's time. When you catch yourself writing "let me build this…", stop typing and call the tool instead.
+- NEVER repeat yourself. Do not re-announce the same intent, re-paste a plan, or write the same sentence twice. If you already said it, act on it.
+- To finish in Build mode, call \`complete\`. That is the only way to end.`,
+  )
+
+  sections.push(
     `TOOLS (call them; don't narrate what you "would" do):
 - read_file, list_dir — inspect the project.
 - write_file — create or fully replace a file.
@@ -69,7 +92,7 @@ export function buildSystemPrompt(opts: {
   )
 
   sections.push(
-    `PRINCIPLES: Prefer the simplest correct change. Match the existing code's style and conventions. Keep edits focused. Narrate briefly in plain language as you work — the user sees your reasoning and your actions live. After making changes, verify by running them. When you auto-pick a tech stack, choose the most fitting modern one and say why in one line.`,
+    `PRINCIPLES: Prefer the simplest correct change. Match the existing code's style and conventions. Keep edits focused. After making changes, verify by running them. When you auto-pick a tech stack, choose the most fitting modern one and say why in one line.`,
   )
 
   sections.push(
@@ -82,10 +105,11 @@ export function buildSystemPrompt(opts: {
 
   if (opts.model === 'arc3ultra') {
     sections.push(
-      `NARRATION (be verbose): Keep the user continuously informed and confident. Before each tool action, say in one short, friendly sentence what you're about to do and why; after it, briefly say what happened. Think out loud, explain your decisions, and call out what you're checking or assuming as you build. Never work silently — a steady stream of clear narration is expected.`,
+      `NARRATION: One short, friendly sentence before a tool call — then the tool call, in the SAME turn. That's it. Do NOT write it more than once, do NOT restate it in different words, and do NOT repeat the same "let me build this" sentence across turns. If you've already said what you're doing, do it — don't say it again.`,
     )
   }
 
+  if (opts.mode !== 'ask') sections.push(DESIGN_GUIDE)
   sections.push(MODE_RULES[opts.mode])
   sections.push(effortRules(opts.effort))
 

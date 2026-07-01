@@ -4,7 +4,7 @@ import { streamArcTurn, chatArc, userMessageFor, isAbort, type ToolMsg } from '.
 import { buildSystemPrompt } from '../config/prompts'
 import { effortConfig, type EffortConfig, type EffortLevel } from './effort'
 import { scrubIdentity } from './sanitize'
-import { TOOL_DEFS, executeTool, parseArgs, titleFor, arcyFor, showsCard } from './tools'
+import { TOOL_DEFS, executeTool, parseArgs, titleFor, arcyFor, showsCard, resetToolMemory } from './tools'
 import { scheduleSave } from './persistence'
 import { cancelQuestion } from './askUser'
 import { readFile, killActiveProcesses } from './webcontainer'
@@ -90,6 +90,7 @@ let conversation: ToolMsg[] | null = null
 /** Reset the thread (new project / resumed project). */
 export function resetConversation(): void {
   conversation = null
+  resetToolMemory() // read/list gates are per-project
 }
 
 // Ensure every assistant tool_call has a matching tool response (an interrupted turn

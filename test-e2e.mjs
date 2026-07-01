@@ -285,5 +285,21 @@ setInterval(step,120);
   console.log(`  index.html: ${before} -> ${info.len} chars`)
 }
 
+if (phase === 'm') {
+  console.log('\n=== PHASE M — quality gates (read-before-edit, list-before-create) ===')
+  const t = async (label, tool, args, expectOk, expectContains) => {
+    const r = await page.evaluate(async (a) => await window.__arc.executeTool(a[0], a[1]), [tool, args])
+    const okMatch = r.ok === expectOk
+    const cMatch = !expectContains || r.result.toLowerCase().includes(expectContains.toLowerCase())
+    console.log(`  ${okMatch && cMatch ? '✓' : '✗'} ${label}: ok=${r.ok} | ${r.result.slice(0, 80).replace(/\n/g, ' ')}`)
+  }
+  await t('create NEW file before listing → BLOCKED', 'write_file', { path: 'gatenew.txt', content: 'x' }, false, 'inspect')
+  await t('list_dir / → ok', 'list_dir', { path: '/' }, true)
+  await t('create NEW file after listing → ALLOWED', 'write_file', { path: 'gatenew.txt', content: 'x' }, true)
+  await t('edit UNREAD README → BLOCKED', 'edit_file', { path: 'README.md', search: 'zzz', replace: 'y' }, false, 'before editing')
+  await t('read_file README → ok', 'read_file', { path: 'README.md' }, true)
+  await t('edit after read → gate passed (search-miss)', 'edit_file', { path: 'README.md', search: 'zzz-absent', replace: 'y' }, false, 'could not find')
+}
+
 await browser.close()
 console.log('done.')
