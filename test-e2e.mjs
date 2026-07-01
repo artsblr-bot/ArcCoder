@@ -236,11 +236,21 @@ if (phase === 'k') {
     Array.from({ length: 120 }, (_, i) => `function fn${i}(){ return ${i} * 2 }`).join('\n') +
     '\n</script>\n<!-- END-MARKER-9137 -->\n'
   console.log('  file length:', big.length, '(old cap was 8000)')
+  await page.evaluate(async () => await window.__arc.executeTool('list_dir', { path: '/' })) // satisfy list-before-create gate
   await page.evaluate(async (content) => await window.__arc.executeTool('write_file', { path: 'big.html', content }), big)
   const rd = await page.evaluate(async () => await window.__arc.executeTool('read_file', { path: 'big.html' }))
-  console.log('  read result length:', rd.result.length)
-  console.log('  sees the JS half (fn119):', rd.result.includes('function fn119'))
-  console.log('  sees the END marker:', rd.result.includes('END-MARKER-9137'))
+  console.log('  16K read length:', rd.result.length, '| sees JS half:', rd.result.includes('function fn119'), '| sees END:', rd.result.includes('END-MARKER-9137'))
+
+  // A file LARGER than the 60K cap must paginate EXPLICITLY (never silently drop content).
+  const huge = 'HEAD-MARK\n' + 'x'.repeat(70000) + '\nTAIL-MARK-4242\n'
+  await page.evaluate(async (content) => await window.__arc.executeTool('write_file', { path: 'huge.txt', content }), huge)
+  const h1 = await page.evaluate(async () => await window.__arc.executeTool('read_file', { path: 'huge.txt' }))
+  const m = h1.result.match(/offset (\d+)/)
+  console.log(`  70K read: explicit "showing chars" header: ${/showing chars 0/.test(h1.result)} | tells offset: ${!!m}`)
+  if (m) {
+    const h2 = await page.evaluate(async (off) => await window.__arc.executeTool('read_file', { path: 'huge.txt', offset: off }), Number(m[1]))
+    console.log(`  offset read reaches the tail (TAIL-MARK): ${h2.result.includes('TAIL-MARK-4242')}`)
+  }
 }
 
 if (phase === 'l') {

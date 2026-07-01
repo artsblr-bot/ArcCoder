@@ -76,6 +76,11 @@ function iterBudgetFor(eff: EffortConfig): number {
   return budgets[eff.level]
 }
 
+// Safety ceiling for a tool result fed back to the model. Each tool already caps its
+// OWN output sensibly (read_file paginates at 60K, run_command/search at 6–8K), so this
+// is only a backstop — it must stay ABOVE read_file's cap or it re-truncates whole files.
+const MAX_TOOL_RESULT = 64_000
+
 // Shown to the model after a prose-only turn in Build mode: nothing happened, so act.
 const STALL_NUDGE =
   'That reply did nothing — you wrote text but called no tool. Act now with a tool call: write_file / edit_file / run_command / start_dev_server to make real progress, or call `complete` if the whole task is truly finished. Do not reply with prose again.'
@@ -317,7 +322,7 @@ async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortCon
         useArc.getState().updateTimeline(cardId, { status: out.ok ? 'done' : 'error', detail: out.detail })
         resolved.add(cardId)
       }
-      messages.push({ role: 'tool', tool_call_id: tc.id, name, content: out.result.slice(0, 6000) })
+      messages.push({ role: 'tool', tool_call_id: tc.id, name, content: out.result.slice(0, MAX_TOOL_RESULT) })
     }
     sweepOrphans(resolved)
     useArc.getState().clearStreamFile()
