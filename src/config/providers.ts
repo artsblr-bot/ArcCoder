@@ -1,0 +1,56 @@
+// The two Arc models. The real provider/model ids live here and NOWHERE in the UI.
+// Everything the user sees is "Arc3Mini" / "Arc3Ultra" by Arc Labs.
+
+export type ArcModelId = 'arc3mini' | 'arc3ultra'
+export type ArcProvider = 'zai' | 'nvidia'
+
+/** OpenAI-compatible base paths (proxied via vite.config.ts / vercel.json). */
+export const NIM_BASE = '/nvapi/v1'
+export const ZAI_BASE = '/zai/api/paas/v4'
+
+export interface ArcModel {
+  id: ArcModelId
+  label: string
+  provider: ArcProvider
+  /** Real upstream model id — hidden from the UI. */
+  model: string
+  base: string
+  /** Exact window — internal use only (it fingerprints the real model). */
+  contextWindow: number
+  /** Abstracted, UI-safe context size. */
+  contextLabel: string
+  multimodal: boolean
+  /** User-facing one-liner (no provider hints). */
+  blurb: string
+}
+
+export const ARC_MODELS: Record<ArcModelId, ArcModel> = {
+  arc3mini: {
+    id: 'arc3mini',
+    label: 'Arc3Mini',
+    provider: 'zai',
+    model: 'glm-4.7-flash',
+    base: ZAI_BASE,
+    contextWindow: 203_000,
+    contextLabel: '~200K',
+    multimodal: false,
+    blurb: 'Fast and efficient — great for quick edits, answers, and small changes.',
+  },
+  arc3ultra: {
+    id: 'arc3ultra',
+    label: 'Arc3Ultra',
+    provider: 'nvidia',
+    model: 'minimaxai/minimax-m3',
+    base: NIM_BASE,
+    contextWindow: 1_000_000,
+    contextLabel: '1M',
+    multimodal: true,
+    blurb: 'Deep reasoning and long-context power — for builds, refactors, and hard problems.',
+  },
+}
+
+export const DEFAULT_MODEL: ArcModelId = 'arc3mini'
+
+export function arcModel(id: ArcModelId): ArcModel {
+  return ARC_MODELS[id]
+}

@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+/* ── Arc Coder — design system from DESIGN-claude.md ──────────────────────────────
+   Warm cream canvas · coral voltage · dark-navy product surfaces · editorial serif. */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-ink: var(--ink);
+  --color-body: var(--body);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-teal: var(--teal);
+  --color-amber: var(--amber);
+
+  /* dark-navy product surfaces (editor / terminal / preview chrome) */
+  --color-dark: var(--dark);
+  --color-dark-2: var(--dark-2);
+  --color-dark-3: var(--dark-3);
+  --color-dark-hairline: var(--dark-hairline);
+  --color-on-dark: var(--on-dark);
+  --color-on-dark-soft: var(--on-dark-soft);
+
+  --font-display: "Fraunces Variable", "Tiempos Headline", Georgia, serif;
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
+:root {
+  --canvas: #faf9f5;
+  --surface-1: #f5f0e8;
+  --surface-2: #efe9de;
+  --surface-3: #e8e0d2;
+  --hairline: #e6dfd8;
+  --hairline-strong: #d8cebd;
+  --ink: #141413;
+  --body: #3d3d3a;
+  --muted: #6c6a64;
+  --faint: #8e8b82;
+  --accent: #cc785c;
+  --accent-strong: #a9583e;
+  --accent-soft: rgba(204, 120, 92, 0.12);
+  --success: #5db872;
+  --warning: #d4a017;
+  --danger: #c64545;
+  --teal: #5db8a6;
+  --amber: #e8a55a;
+
+  --dark: #181715;
+  --dark-2: #1f1e1b;
+  --dark-3: #252320;
+  --dark-hairline: #322f2a;
+  --on-dark: #faf9f5;
+  --on-dark-soft: #a09d96;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background-color: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  ::selection {
+    background: var(--accent-soft);
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline-strong);
+    border-radius: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* Eyebrow / instrument label (uppercase, tracked). */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Reliable, degrade-safe entrance. */
+@keyframes arc-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.arc-rise {
+  animation: arc-rise 0.7s cubic-bezier(0.2, 0.6, 0.2, 1) both;
+}
+.arc-still .arc-rise {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
+
+/* Latency-masking + reward motion (adapted from the Gurukul Uploader's motion craft). */
+@keyframes arc-shimmer {
+  0% {
+    background-position: -120% 0;
+  }
+  100% {
+    background-position: 220% 0;
+  }
+}
+.arc-shimmer {
+  background-image: linear-gradient(90deg, transparent 0%, var(--accent-soft) 50%, transparent 100%);
+  background-size: 60% 100%;
+  background-repeat: no-repeat;
+  animation: arc-shimmer 1.4s linear infinite;
+}
+@keyframes arc-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.arc-breathe {
+  animation: arc-breathe 1.8s ease-in-out infinite;
+}
+@keyframes arc-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.arc-blink {
+  animation: arc-blink 1.05s steps(1) infinite;
+}
+
+/* SUPERCODE boost — animated spectrum (the one place the palette goes loud). */
+.arc-spectrum {
+  background-image: linear-gradient(90deg, #cc785c, #e8a55a, #5db8a6, #a78bdc, #cc785c);
+  background-size: 200% 100%;
+  animation: arc-spectrum-slide 3s linear infinite;
+}
+@keyframes arc-spectrum-slide {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
