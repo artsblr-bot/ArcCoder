@@ -3,7 +3,6 @@ import { routeModel } from './router'
 import { streamArcTurn, chatArc, userMessageFor, isAbort, type ToolMsg } from './arcChat'
 import { buildSystemPrompt } from '../config/prompts'
 import { effortConfig, type EffortConfig, type EffortLevel } from './effort'
-import { scrubIdentity } from './sanitize'
 import { TOOL_DEFS, executeTool, parseArgs, titleFor, arcyFor, showsCard, resetToolMemory } from './tools'
 import { scheduleSave } from './persistence'
 import { cancelQuestion } from './askUser'
@@ -206,13 +205,15 @@ async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortCon
     const events = {
       onReasoning: (d: string) => {
         rawReason += d
+        useArc.getState().addContext(estimateTokens(d)) // meter climbs live so a long turn doesn't look frozen
         if (!reasoningId) reasoningId = useArc.getState().pushTimeline({ kind: 'reasoning', text: '' })
-        useArc.getState().updateTimeline(reasoningId, { text: scrubIdentity(rawReason) })
+        useArc.getState().updateTimeline(reasoningId, { text: rawReason })
       },
       onText: (d: string) => {
         rawText += d
+        useArc.getState().addContext(estimateTokens(d))
         if (!assistantId) assistantId = useArc.getState().pushTimeline({ kind: 'assistant', text: '' })
-        useArc.getState().updateTimeline(assistantId, { text: scrubIdentity(rawText) })
+        useArc.getState().updateTimeline(assistantId, { text: rawText })
       },
       // As Arc "types" a tool call, show it live in the chat: an action card appears
       // immediately and its body (file content, command, query) fills in word-by-word.
@@ -223,6 +224,7 @@ async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortCon
         e.args += frag
         argBuf.set(index, e)
         const st = useArc.getState()
+        if (frag) st.addContext(estimateTokens(frag)) // file-write streaming moves the meter too
         if (e.name && showsCard(e.name) && e.name !== 'complete') {
           const path = e.name === 'write_file' ? partialField(e.args, 'path') : null
           const np = path ? '/' + path.replace(/^\/+/, '') : undefined
@@ -252,9 +254,9 @@ async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortCon
     forceTools = false
 
     const st = useArc.getState()
-    if (reasoningId) st.updateTimeline(reasoningId, { text: scrubIdentity(res.reasoning), done: true })
-    if (assistantId) st.updateTimeline(assistantId, { text: scrubIdentity(res.text) })
-    st.addContext(estimateTokens(res.text) + estimateTokens(res.reasoning))
+    if (reasoningId) st.updateTimeline(reasoningId, { text: res.reasoning, done: true })
+    if (assistantId) st.updateTimeline(assistantId, { text: res.text })
+    // Context is now tallied live in the delta handlers above — no end-of-turn add.
 
     // Any card we started rendering for a tool call that didn't survive (e.g. a large
     // write_file truncated by the token limit) must be resolved, never left spinning.

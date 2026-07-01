@@ -135,9 +135,9 @@ function render(it: TimelineItem, live: boolean) {
       return <Reasoning item={it} />
     case 'assistant':
       return it.text.trim() ? (
-        <div className="max-w-[94%] whitespace-pre-wrap text-sm leading-relaxed text-body">
+        <div className="max-w-[94%] whitespace-pre-wrap text-sm italic leading-relaxed text-body">
           {it.text}
-          {live && <span className="arc-blink text-accent">▌</span>}
+          {live && <span className="arc-blink text-accent not-italic">▌</span>}
         </div>
       ) : null
     case 'action':
