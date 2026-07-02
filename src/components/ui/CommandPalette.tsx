@@ -31,6 +31,7 @@ export function CommandPalette() {
       { label: 'Show blueprint', run: () => s.setCenterView('blueprint') },
       { label: 'Model: Arc3Mini', hint: 'Fast', run: () => s.setOverride('arc3mini') },
       { label: 'Model: Arc3Ultra', hint: 'Deep', run: () => s.setOverride('arc3ultra') },
+      { label: 'Model: Ask each time', hint: 'Pick per prompt', run: () => s.setOverride(null) },
       { label: 'Mode: Build', run: () => s.setMode('build') },
       { label: 'Mode: Ask', run: () => s.setMode('ask') },
       { label: 'Mode: Plan', run: () => s.setMode('plan') },

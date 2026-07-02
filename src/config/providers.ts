@@ -40,7 +40,9 @@ export const ARC_MODELS: Record<ArcModelId, ArcModel> = {
     id: 'arc3ultra',
     label: 'Arc3Ultra',
     provider: 'nvidia',
-    model: 'minimaxai/minimax-m3',
+    // minimaxai/minimax-m3 went DEGRADED on NIM (400 "cannot be invoked"); m2.7 is the
+    // healthy same-family drop-in (identical reasoning/API shape). Swap back if m3 recovers.
+    model: 'minimaxai/minimax-m2.7',
     base: NIM_BASE,
     contextWindow: 1_000_000,
     contextLabel: '1M',

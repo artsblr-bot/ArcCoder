@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Brain, Check, Loader2, AlertTriangle, FileEdit, TerminalSquare, Search, ListChecks, Sparkles, ChevronRight, Wrench } from 'lucide-react'
+import { Brain, Check, Loader2, AlertTriangle, FileEdit, TerminalSquare, Search, ListChecks, Sparkles, ChevronRight, Wrench, RefreshCw } from 'lucide-react'
 import { useArc, type TimelineItem } from '../../store/arc'
-import { runTurn, isRunning } from '../../services/agentLoop'
+import { runTurn, isRunning, retryOn } from '../../services/agentLoop'
+import { ARC_MODELS, type ArcModelId } from '../../config/providers'
 
 function FixButton({ context }: { context: string }) {
   return (
@@ -13,6 +14,21 @@ function FixButton({ context }: { context: string }) {
       className="flex items-center gap-1.5 self-start rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-white transition hover:bg-accent-strong"
     >
       <Wrench size={12} /> Fix with Arc
+    </button>
+  )
+}
+
+// Offered when a turn fails because a provider is down/unresponsive: retry the same
+// prompt on the other model (a different provider), which is very likely still up.
+function FailoverButton({ model }: { model: ArcModelId }) {
+  return (
+    <button
+      onClick={() => {
+        if (!isRunning()) retryOn(model)
+      }}
+      className="flex items-center gap-1.5 self-start rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-white transition hover:bg-accent-strong"
+    >
+      <RefreshCw size={12} /> Continue on {ARC_MODELS[model].label}
     </button>
   )
 }
@@ -152,7 +168,7 @@ function render(it: TimelineItem, live: boolean) {
           <span className="flex items-start gap-2">
             <AlertTriangle size={14} className="mt-0.5 shrink-0" /> <span className="whitespace-pre-wrap">{it.text}</span>
           </span>
-          <FixButton context={it.text} />
+          {it.retry ? <FailoverButton model={it.retry} /> : <FixButton context={it.text} />}
         </div>
       )
   }

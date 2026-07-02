@@ -41,9 +41,9 @@ export function Composer() {
   const text = useArc((s) => s.draft)
   const setDraft = useArc((s) => s.setDraft)
   const [images, setImages] = useState<string[]>([])
-  const model = useArc((s) => s.model)
   const override = useArc((s) => s.override)
   const setOverride = useArc((s) => s.setOverride)
+  const setPendingPrompt = useArc((s) => s.setPendingPrompt)
   const mode = useArc((s) => s.mode)
   const setMode = useArc((s) => s.setMode)
   const effort = useArc((s) => s.effort)
@@ -126,6 +126,11 @@ export function Composer() {
     setMention(null)
     scheduleSave()
     const attachments = await expandMentions(message)
+    // No model chosen yet — pop the picker first, then run once the user decides.
+    if (!override) {
+      setPendingPrompt({ text: message, images: imgs, attachments })
+      return
+    }
     void runTurn(message, imgs, attachments)
   }
 
@@ -243,13 +248,13 @@ export function Composer() {
 
       <div className="flex flex-wrap items-center gap-2">
         <Menu
-          value={override ?? model}
+          value={override ?? ''}
           options={MODEL_OPTS}
           onChange={(v) => setOverride(v as ArcModelId)}
           trigger={
             <span className="flex items-center gap-1.5">
               <Cpu size={13} className="text-accent" />
-              {ARC_MODELS[override ?? model].label}
+              {override ? ARC_MODELS[override].label : 'Select model'}
             </span>
           }
         />

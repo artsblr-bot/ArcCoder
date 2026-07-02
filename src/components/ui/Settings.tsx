@@ -155,6 +155,7 @@ export function Settings() {
               <Row label="Model">
                 <Seg active={override === 'arc3mini'} onClick={() => setOverride('arc3mini' as ArcModelId)}>Arc3Mini</Seg>
                 <Seg active={override === 'arc3ultra'} onClick={() => setOverride('arc3ultra' as ArcModelId)}>Arc3Ultra</Seg>
+                <Seg active={override === null} onClick={() => setOverride(null)}>Ask each time</Seg>
               </Row>
 
               <div className="my-2 h-px bg-hairline" />

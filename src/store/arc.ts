@@ -18,7 +18,7 @@ export type TimelineItem =
   | { kind: 'action'; id: string; tool: string; title: string; detail?: string; path?: string; status: 'running' | 'done' | 'error' }
   | { kind: 'plan'; id: string; title: string; steps: string[]; status: 'pending' | 'approved' }
   | { kind: 'switch'; id: string; text: string; to: ArcModelId }
-  | { kind: 'error'; id: string; text: string }
+  | { kind: 'error'; id: string; text: string; retry?: ArcModelId } // retry = a model to offer one-click failover to
 
 export interface Task {
   id: string
@@ -48,10 +48,13 @@ interface ArcState {
 
   // agent controls
   model: ArcModelId
-  override: ArcModelId | null
+  override: ArcModelId | null // the chosen model, or null = "not chosen yet — ask on next prompt"
   mode: AgentMode
   effort: EffortLevel
   status: AgentStatus
+
+  // a prompt waiting for the user to pick a model before it runs (drives the ModelPicker popup)
+  pendingPrompt: { text: string; images: string[]; attachments: string } | null
 
   // conversation
   timeline: TimelineItem[]
@@ -94,6 +97,7 @@ interface ArcActions {
 
   setModel: (m: ArcModelId) => void
   setOverride: (m: ArcModelId | null) => void
+  setPendingPrompt: (p: ArcState['pendingPrompt']) => void
   setMode: (m: AgentMode) => void
   setEffort: (e: EffortLevel) => void
   setStatus: (s: AgentStatus) => void
@@ -102,6 +106,7 @@ interface ArcActions {
   updateTimeline: (id: string, patch: Record<string, unknown>) => void
   appendText: (id: string, kind: 'reasoning' | 'assistant', delta: string) => void
   finishRunningCards: () => void
+  dropLastExchange: () => void
   clearTimeline: () => void
 
   setTasks: (t: Task[]) => void
@@ -149,10 +154,11 @@ export const useArc = create<ArcState & ArcActions>((set, get) => ({
   projectId: nanoid(10),
 
   model: 'arc3mini',
-  override: 'arc3mini',
+  override: null, // no model chosen yet — the first prompt asks the user to pick
   mode: 'build',
   effort: 'medium',
   status: 'idle',
+  pendingPrompt: null,
 
   timeline: [],
   tasks: [],
@@ -183,7 +189,8 @@ export const useArc = create<ArcState & ArcActions>((set, get) => ({
   setDraft: (draft) => set({ draft }),
   hydrate: (p) => set(p),
   newProject: () =>
-    set({ projectId: nanoid(10), projectName: 'untitled', timeline: [], tasks: [], openFiles: [], activeFile: null, previewUrl: null, previewInjected: false, contextTokens: 0, centerView: 'editor', draft: '', baselines: {}, agentTouched: {}, problems: 0, cursor: { line: 1, col: 1 } }),
+    // A new project starts with no model chosen — the first prompt asks the user to pick.
+    set({ projectId: nanoid(10), projectName: 'untitled', timeline: [], tasks: [], openFiles: [], activeFile: null, previewUrl: null, previewInjected: false, contextTokens: 0, centerView: 'editor', draft: '', baselines: {}, agentTouched: {}, problems: 0, cursor: { line: 1, col: 1 }, override: null, pendingPrompt: null }),
   toggleTheme: () => {
     const theme = get().theme === 'dark' ? 'light' : 'dark'
     applyTheme(theme)
@@ -198,6 +205,7 @@ export const useArc = create<ArcState & ArcActions>((set, get) => ({
 
   setModel: (model) => set({ model }),
   setOverride: (override) => set({ override }),
+  setPendingPrompt: (pendingPrompt) => set({ pendingPrompt }),
   setMode: (mode) => set({ mode }),
   setEffort: (effort) => set({ effort }),
   setStatus: (status) => set({ status }),
@@ -217,6 +225,19 @@ export const useArc = create<ArcState & ArcActions>((set, get) => ({
     set((s) => ({
       timeline: s.timeline.map((t) => (t.kind === 'action' && t.status === 'running' ? { ...t, status: 'error' as const } : t)),
     })),
+  // Drop everything from the last user message onward — used when retrying a failed
+  // turn on another model, so the replay doesn't duplicate the message or keep the error.
+  dropLastExchange: () =>
+    set((s) => {
+      let cut = -1
+      for (let i = s.timeline.length - 1; i >= 0; i--) {
+        if (s.timeline[i].kind === 'user') {
+          cut = i
+          break
+        }
+      }
+      return cut === -1 ? {} : { timeline: s.timeline.slice(0, cut) }
+    }),
   clearTimeline: () => set({ timeline: [], tasks: [] }),
 
   setTasks: (tasks) => set({ tasks }),

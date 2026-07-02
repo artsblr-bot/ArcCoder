@@ -1,13 +1,13 @@
 import { useArc } from '../store/arc'
 import { routeModel } from './router'
-import { streamArcTurn, chatArc, userMessageFor, isAbort, type ToolMsg } from './arcChat'
+import { streamArcTurn, chatArc, userMessageFor, isAbort, ArcError, type ToolMsg } from './arcChat'
 import { buildSystemPrompt } from '../config/prompts'
 import { effortConfig, type EffortConfig, type EffortLevel } from './effort'
 import { TOOL_DEFS, executeTool, parseArgs, titleFor, arcyFor, showsCard, resetToolMemory } from './tools'
 import { scheduleSave } from './persistence'
 import { cancelQuestion } from './askUser'
 import { readFile, killActiveProcesses } from './webcontainer'
-import type { ArcModelId } from '../config/providers'
+import { ARC_MODELS, type ArcModelId } from '../config/providers'
 
 /** Extract a (possibly unterminated) JSON string value from streaming tool args. */
 function partialField(args: string, key: string): string | null {
@@ -86,6 +86,34 @@ const STALL_NUDGE =
   'That reply did nothing — you wrote text but called no tool. Act now with a tool call: write_file / edit_file / run_command / start_dev_server to make real progress, or call `complete` if the whole task is truly finished. Do not reply with prose again.'
 
 let controller: AbortController | null = null
+
+// The last turn's inputs, so a failed turn can be replayed on another model (failover).
+let lastTurn: { userText: string; images: string[]; attachments: string } | null = null
+
+// A provider that's down/unresponsive → offer to continue on the OTHER model (a
+// different provider), which is very likely still up. Only for availability errors.
+function altModelFor(e: unknown, current: ArcModelId): ArcModelId | null {
+  if (!(e instanceof ArcError)) return null
+  if (e.kind === 'busy' || e.kind === 'unreachable' || e.kind === 'network' || e.kind === 'exhausted') {
+    return current === 'arc3ultra' ? 'arc3mini' : 'arc3ultra'
+  }
+  return null
+}
+
+/**
+ * Retry the last turn on a different model (one-click failover from an error card).
+ * The failed user message is already in the thread + timeline, so we drop that
+ * exchange first and let runTurn replay it cleanly on the chosen model.
+ */
+export function retryOn(model: ArcModelId): void {
+  if (isRunning() || !lastTurn) return
+  const t = lastTurn
+  const store = useArc.getState()
+  store.setOverride(model) // an explicit switch — honoured by the router
+  if (conversation && conversation[conversation.length - 1]?.role === 'user') conversation.pop()
+  store.dropLastExchange()
+  void runTurn(t.userText, t.images, t.attachments)
+}
 
 // The full model thread (system + every user/assistant/tool message), kept across
 // turns so context — including prior tool calls and their results — is preserved.
@@ -334,6 +362,7 @@ async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortCon
 export async function runTurn(userText: string, images: string[] = [], attachments = ''): Promise<void> {
   const store = useArc.getState()
   if (isRunning() || !userText.trim()) return
+  lastTurn = { userText, images, attachments } // remembered for one-click failover on error
   store.resetBaselines() // diff gutters reflect what changes in THIS turn
   // Extra context (e.g. @-referenced file contents) goes to the model but not the visible message.
   const modelText = attachments ? `${userText}\n\n${attachments}` : userText
@@ -384,7 +413,9 @@ export async function runTurn(userText: string, images: string[] = [], attachmen
       st.setStatus('idle')
       st.setArcy('idle', 'agent')
     } else {
-      st.pushTimeline({ kind: 'error', text: userMessageFor(e) })
+      const alt = altModelFor(e, route.model)
+      const text = alt ? `${ARC_MODELS[route.model].label} isn’t responding right now.` : userMessageFor(e)
+      st.pushTimeline({ kind: 'error', text, retry: alt ?? undefined })
       st.setStatus('error')
       st.setArcy('fixing', 'agent')
       window.setTimeout(() => useArc.getState().setArcy('idle', 'agent'), 2200)

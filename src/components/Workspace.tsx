@@ -16,7 +16,7 @@ This is your workspace. Ask **Arc** on the right to build something — a web ap
 a script, a game — and watch it happen here.
 
 - Real files, a real terminal (npm · node · git), and a live preview.
-- Arc3Mini handles quick tasks; Arc3Ultra takes the heavy ones — automatically.
+- Choose your model when you send a prompt: Arc3Mini for speed, Arc3Ultra for depth.
 `
 
 function Pane({ ids, navy, children }: { ids: PanelId[]; navy?: boolean; children: ReactNode }) {

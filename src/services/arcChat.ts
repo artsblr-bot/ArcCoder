@@ -100,6 +100,11 @@ export function userMessageFor(err: unknown): string {
 const MAX_RETRIES = 4
 const BACKOFF_BASE_MS = 900
 const BACKOFF_CAP_MS = 20_000
+// How long to wait for the FIRST token before treating the provider as unresponsive.
+// Only applies before any token arrives — a stream that has started is never bounded.
+// Set above MiniMax-m2.7's observed cold-start (~56s) so a cold-but-healthy worker gets
+// to warm up rather than falsely failing over; still ends a genuine hang.
+const TTFT_MS = 75_000
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -206,11 +211,43 @@ export async function streamArcTurn(
     temperature: opts.temperature ?? 0.5,
     top_p: opts.top_p ?? 0.9,
     max_tokens: opts.maxTokens ?? 4096,
+    // Arc3Ultra (MiniMax on NIM) is prone to repetition collapse (streams of "/> ">
+    // when it dumps big HTML) — a mild frequency penalty pulls it out of the loop.
+    ...(m.provider === 'nvidia' ? { frequency_penalty: 0.4 } : {}),
     stream: true,
   })
 
-  const res = await arcFetch(m, body, opts.signal)
-  assertJsonish(res)
+  // Time-to-FIRST-token watchdog. This only bounds the wait BEFORE any token arrives
+  // and self-disables the instant the model streams anything, so (unlike a per-stream
+  // timeout) it can never interrupt a response that's flowing. It turns a provider that
+  // connects-but-never-answers (e.g. NVIDIA having issues) into a clean error instead of
+  // an endless "Arc is working…". We drive it through a linked inner AbortController.
+  const inner = new AbortController()
+  if (opts.signal) {
+    if (opts.signal.aborted) inner.abort()
+    else opts.signal.addEventListener('abort', () => inner.abort(), { once: true })
+  }
+  let timedOut = false
+  let ttft: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    timedOut = true
+    inner.abort()
+  }, TTFT_MS)
+  const clearTtft = () => {
+    if (ttft !== undefined) {
+      clearTimeout(ttft)
+      ttft = undefined
+    }
+  }
+
+  let res: Response
+  try {
+    res = await arcFetch(m, body, inner.signal)
+    assertJsonish(res)
+  } catch (e) {
+    clearTtft()
+    if (timedOut) throw new ArcError('unreachable', MSG.unreachable)
+    throw e
+  }
 
   const reader = res.body!.getReader()
   const decoder = new TextDecoder()
@@ -221,6 +258,22 @@ export async function streamArcTurn(
   let sawAny = false
   const accs: ToolAcc[] = []
   const idSlot = new Map<string, number>()
+
+  // Degeneration guard: if the model collapses into repeating a tiny fragment
+  // (e.g. "/> "/> "/> …), stop the stream so we don't burn the whole token budget
+  // on garbage — whatever real content/tool-call came before is still recovered.
+  let degenerate = false
+  let prevFrag = ''
+  let repeatRun = 0
+  const feedDegen = (d: string) => {
+    const t = d.trim()
+    if (t && t.length <= 8 && t === prevFrag) {
+      if (++repeatRun >= 80) degenerate = true
+    } else {
+      prevFrag = t
+      repeatRun = 0
+    }
+  }
 
   const processData = (data: string) => {
     if (!data || data === '[DONE]') return
@@ -233,6 +286,7 @@ export async function streamArcTurn(
     const choice = (json as { choices?: Array<Record<string, unknown>> })?.choices?.[0]
     if (!choice) return
     sawAny = true
+    clearTtft() // first real token — drop the watchdog; a flowing stream is never bounded
     const delta = choice.delta as
       | { content?: string | null; reasoning_content?: string | null; reasoning?: string | null; tool_calls?: Array<Record<string, unknown>> }
       | undefined
@@ -240,10 +294,12 @@ export async function streamArcTurn(
     const r = delta?.reasoning_content ?? delta?.reasoning
     if (r) {
       reasoning += r
+      feedDegen(r)
       events.onReasoning?.(r)
     }
     if (delta?.content) {
       text += delta.content
+      feedDegen(delta.content)
       events.onText?.(delta.content)
     }
     if (delta?.tool_calls) {
@@ -282,30 +338,39 @@ export async function streamArcTurn(
       const lines = buf.split('\n')
       buf = lines.pop() ?? ''
       for (const line of lines) processLine(line)
+      if (degenerate) {
+        await reader.cancel().catch(() => {})
+        break
+      }
     }
   } catch (err) {
+    clearTtft()
+    if (timedOut) throw new ArcError('unreachable', MSG.unreachable) // never streamed a token
     if (isAbort(err)) throw err
     throw new ArcError('network', MSG.network)
   }
+  clearTtft()
   // Flush decoder + process any residual (un-terminated) trailing line.
   buf += decoder.decode()
   for (const line of buf.split('\n')) processLine(line)
 
-  const truncated = finishReason === 'length'
+  const truncated = finishReason === 'length' || degenerate
   let toolCalls: ToolCall[] = accs
     .filter(Boolean)
     .map((a, i) => ({ id: a.id || `call-${i}`, type: 'function' as const, function: { name: a.name, arguments: a.arguments } }))
     // Drop calls whose args clearly didn't finish arriving.
     .filter((c) => !truncated || c.function.arguments.trim() === '' || parseLooseJson(c.function.arguments) !== null)
 
-  // Inline tool-call fallback for models that emit markup instead of structured deltas.
+  // Inline tool-call fallback for models that emit tool calls as TEXT instead of
+  // structured deltas — XML dialects, or (Arc3Ultra/MiniMax on NIM) a JSON array using
+  // "parameters"/"arguments". Validated against the real tool names so ordinary JSON
+  // in a reply is never mistaken for a tool call.
   let cleanText = text
-  if (toolCalls.length === 0 && /<tool_call>|<function=/.test(text)) {
-    const inline = extractInlineToolCalls(text)
-    if (inline.length) {
-      toolCalls = inline
-      const cut = text.search(/<tool_call>|<function=/)
-      if (cut >= 0) cleanText = text.slice(0, cut)
+  if (toolCalls.length === 0 && text.trim()) {
+    const inline = extractInlineToolCalls(text, new Set(tools.map((t) => t.function.name)))
+    if (inline.calls.length) {
+      toolCalls = inline.calls
+      cleanText = inline.cleanText
     }
   }
 
@@ -317,41 +382,98 @@ export async function streamArcTurn(
   return { text: cleanText, reasoning, toolCalls, finishReason, truncated }
 }
 
-export function extractInlineToolCalls(text: string): ToolCall[] {
-  const calls: ToolCall[] = []
+/** Scan out the first balanced {...}/[...] block and where it starts (for stripping it from prose). */
+function firstJsonBlock(s: string): { block: string; start: number } | null {
+  const start = s.search(/[[{]/)
+  if (start === -1) return null
+  const open = s[start]
+  const close = open === '{' ? '}' : ']'
+  let depth = 0
+  let inStr = false
+  let esc = false
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === open) depth++
+    else if (c === close) {
+      depth--
+      if (depth === 0) return { block: s.slice(start, i + 1), start }
+    }
+  }
+  return null // unterminated (e.g. truncated) — no reliable block
+}
+
+export function extractInlineToolCalls(text: string, validNames?: Set<string>): { calls: ToolCall[]; cleanText: string } {
   let i = 0
 
-  // Dialect A: <tool_call>{ "name": "...", "arguments": {...} }</tool_call>
-  const tcRe = /<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|$)/g
-  let tm: RegExpExecArray | null
-  while ((tm = tcRe.exec(text))) {
-    const obj = parseLooseJson(tm[1]) as { name?: string; arguments?: unknown } | null
-    if (obj?.name) {
-      const args = typeof obj.arguments === 'string' ? obj.arguments : JSON.stringify(obj.arguments ?? {})
-      calls.push({ id: `inline-${i++}`, type: 'function', function: { name: obj.name, arguments: args } })
+  // Dialect A: <tool_call>{ "name": "...", "arguments"/"parameters": {...} }</tool_call>
+  const aStart = text.search(/<tool_call>/)
+  if (aStart >= 0) {
+    const calls: ToolCall[] = []
+    const tcRe = /<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|$)/g
+    let tm: RegExpExecArray | null
+    while ((tm = tcRe.exec(text))) {
+      const obj = parseLooseJson(tm[1]) as { name?: string; arguments?: unknown; parameters?: unknown } | null
+      if (obj?.name) {
+        const rawArgs = obj.arguments ?? obj.parameters
+        const args = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs ?? {})
+        calls.push({ id: `inline-${i++}`, type: 'function', function: { name: obj.name, arguments: args } })
+      }
+      if (!tm[0].endsWith('</tool_call>')) break
     }
-    if (!tm[0].endsWith('</tool_call>')) break
+    if (calls.length) return { calls, cleanText: text.slice(0, aStart).trim() }
   }
-  if (calls.length) return calls
 
   // Dialect B: <function=NAME><parameter=P>VALUE</parameter></function>
-  const fnRe = /<function=([^>\s]+)\s*>([\s\S]*?)(?:<\/function>|$)/g
-  let m: RegExpExecArray | null
-  while ((m = fnRe.exec(text))) {
-    const name = m[1].trim()
-    const argBody = m[2]
-    const args: Record<string, unknown> = {}
-    const pRe = /<parameter=([^>\s]+)\s*>\n?([\s\S]*?)(?:\n?<\/parameter>|$)/g
-    let pm: RegExpExecArray | null
-    while ((pm = pRe.exec(argBody))) {
-      const raw = pm[2].trim()
-      const parsed = parseLooseJson(raw)
-      args[pm[1].trim()] = parsed !== null ? parsed : raw
+  const bStart = text.search(/<function=/)
+  if (bStart >= 0) {
+    const calls: ToolCall[] = []
+    const fnRe = /<function=([^>\s]+)\s*>([\s\S]*?)(?:<\/function>|$)/g
+    let m: RegExpExecArray | null
+    while ((m = fnRe.exec(text))) {
+      const name = m[1].trim()
+      const argBody = m[2]
+      const args: Record<string, unknown> = {}
+      const pRe = /<parameter=([^>\s]+)\s*>\n?([\s\S]*?)(?:\n?<\/parameter>|$)/g
+      let pm: RegExpExecArray | null
+      while ((pm = pRe.exec(argBody))) {
+        const raw = pm[2].trim()
+        const parsed = parseLooseJson(raw)
+        args[pm[1].trim()] = parsed !== null ? parsed : raw
+      }
+      if (name) calls.push({ id: `inline-${i++}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })
+      if (!m[0].endsWith('</function>')) break
     }
-    if (name) calls.push({ id: `inline-${i++}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })
-    if (!m[0].endsWith('</function>')) break
+    if (calls.length) return { calls, cleanText: text.slice(0, bStart).trim() }
   }
-  return calls
+
+  // Dialect C: a JSON array/object of tool calls emitted as plain text (MiniMax on NIM),
+  // e.g. [ { "name": "write_file", "parameters": {...} } ]. Only accepted when the object's
+  // name matches a REAL tool, so a normal JSON answer is never hijacked.
+  if (validNames && validNames.size) {
+    const jb = firstJsonBlock(text)
+    if (jb) {
+      const parsed = parseLooseJson(jb.block)
+      const arr = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? [parsed] : []
+      const calls: ToolCall[] = []
+      for (const o of arr as Array<{ name?: unknown; arguments?: unknown; parameters?: unknown }>) {
+        const name = typeof o?.name === 'string' ? o.name : ''
+        if (!name || !validNames.has(name)) continue
+        const rawArgs = o.arguments ?? o.parameters ?? {}
+        const args = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs)
+        calls.push({ id: `inline-${i++}`, type: 'function', function: { name, arguments: args } })
+      }
+      if (calls.length) return { calls, cleanText: text.slice(0, jb.start).trim() }
+    }
+  }
+
+  return { calls: [], cleanText: text }
 }
 
 // ── Non-streaming helpers (internal pipeline steps, judges, etc.) ────────────────

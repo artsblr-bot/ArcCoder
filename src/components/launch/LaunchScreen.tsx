@@ -3,7 +3,7 @@ import { ArrowUp, FolderOpen } from 'lucide-react'
 import { ArcMark } from '../ui/ArcMark'
 import { Arcy } from '../mascot/Arcy'
 import { useArc } from '../../store/arc'
-import { runTurn, resetConversation } from '../../services/agentLoop'
+import { resetConversation } from '../../services/agentLoop'
 import { listProjects, resumeProject, type SavedProject } from '../../services/persistence'
 
 const CHIPS = ['A React to-do app', 'A coffee-shop landing page', 'A Snake game', 'A markdown notes app']
@@ -13,6 +13,7 @@ export function LaunchScreen() {
   const [recent, setRecent] = useState<SavedProject[]>([])
   const setView = useArc((s) => s.setView)
   const newProject = useArc((s) => s.newProject)
+  const setPendingPrompt = useArc((s) => s.setPendingPrompt)
   const costume = useArc((s) => s.costume)
 
   useEffect(() => {
@@ -22,10 +23,10 @@ export function LaunchScreen() {
   const go = (t?: string) => {
     const prompt = (t ?? text).trim()
     if (!prompt) return
-    newProject()
+    newProject() // resets the model choice — the picker asks before this prompt runs
     resetConversation()
     setView('workspace')
-    window.setTimeout(() => void runTurn(prompt), 60)
+    setPendingPrompt({ text: prompt, images: [], attachments: '' })
   }
 
   const resume = async (id: string) => {
@@ -134,8 +135,8 @@ export function LaunchScreen() {
       </div>
 
       <footer className="arc-rise pb-6 text-center text-[12.5px] text-muted" style={{ animationDelay: '0.42s' }}>
-        Two models — <span className="text-body">Arc3Mini</span> for speed, <span className="text-body">Arc3Ultra</span> for depth —
-        chosen automatically as you work.
+        Two models — <span className="text-body">Arc3Mini</span> for speed, <span className="text-body">Arc3Ultra</span> for depth.
+        You pick which one builds each project.
       </footer>
     </div>
   )

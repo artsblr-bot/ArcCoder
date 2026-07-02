@@ -10,6 +10,7 @@ import { Toast } from './components/ui/Toast'
 import { BoostSkin } from './components/ui/BoostSkin'
 import { CommandPalette } from './components/ui/CommandPalette'
 import { Settings } from './components/ui/Settings'
+import { ModelPicker } from './components/ui/ModelPicker'
 
 export default function App() {
   const view = useArc((s) => s.view)
@@ -50,6 +51,7 @@ export default function App() {
       <BoostSkin />
       <CommandPalette />
       <Settings />
+      <ModelPicker />
     </div>
   )
 }
