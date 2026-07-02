@@ -1,4 +1,4 @@
-import { type ArcModelId, ARC_MODELS } from '../config/providers'
+import { type ArcModelId, ARC_MODELS, VISION_MODEL } from '../config/providers'
 import { effortConfig, type EffortLevel } from './effort'
 
 export interface RouteInput {
@@ -25,8 +25,9 @@ export interface RouteResult {
 export function routeModel(input: RouteInput): RouteResult {
   const prev = input.prev
   const decide = (): { model: ArcModelId; reason: string } => {
-    // Arc3Mini can't see images — force Arc3Ultra regardless of the pin (capability).
-    if (input.hasImage && input.override !== 'arc3ultra') return { model: 'arc3ultra', reason: 'image input' }
+    // Image input must go to a vision-capable model (capability override). Inert while
+    // no model is multimodal — the composer hides attach then, so hasImage stays false.
+    if (input.hasImage && VISION_MODEL && input.override !== VISION_MODEL) return { model: VISION_MODEL, reason: 'image input' }
     // The user chooses the model explicitly (no auto-routing).
     if (input.override) return { model: input.override, reason: 'pinned by you' }
     // Fallback only (override is normally always set).

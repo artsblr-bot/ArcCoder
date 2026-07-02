@@ -81,6 +81,10 @@ function iterBudgetFor(eff: EffortConfig): number {
 // is only a backstop — it must stay ABOVE read_file's cap or it re-truncates whole files.
 const MAX_TOOL_RESULT = 64_000
 
+// Arc3Ultra (m2.7) is only ~200K context and starts forgetting past ~70% full, so we
+// auto-compact the thread once it crosses this fraction of the active model's window.
+const COMPACT_AT = 0.7
+
 // Shown to the model after a prose-only turn in Build mode: nothing happened, so act.
 const STALL_NUDGE =
   'That reply did nothing — you wrote text but called no tool. Act now with a tool call: write_file / edit_file / run_command / start_dev_server to make real progress, or call `complete` if the whole task is truly finished. Do not reply with prose again.'
@@ -152,6 +156,73 @@ function trimConversation(): void {
   // Never start with an orphaned tool result (would break the API pairing).
   while (rest.length && rest[0].role === 'tool') rest.shift()
   conversation = [sys, ...rest]
+}
+
+/** Rough token estimate for the whole thread (chars/4, matching the meter). */
+function conversationTokens(): number {
+  if (!conversation) return 0
+  let chars = 0
+  for (const m of conversation) {
+    if (typeof m.content === 'string') chars += m.content.length
+    else if (Array.isArray(m.content)) for (const p of m.content) if (p.type === 'text') chars += p.text.length
+    if (m.tool_calls) for (const tc of m.tool_calls) chars += tc.function.name.length + tc.function.arguments.length
+  }
+  return Math.ceil(chars / 4)
+}
+
+/** One readable line per message, for feeding older turns to the summarizer. */
+function summarizeMsg(m: ToolMsg): string {
+  let text = typeof m.content === 'string' ? m.content : Array.isArray(m.content) ? m.content.map((p) => (p.type === 'text' ? p.text : '[image]')).join(' ') : ''
+  if (m.tool_calls?.length) text += ' ' + m.tool_calls.map((t) => `→${t.function.name}(${t.function.arguments})`).join(' ')
+  if (m.role === 'tool') text = `[${m.name} result] ${text}`
+  return `${m.role.toUpperCase()}: ${text}`.slice(0, 2000)
+}
+
+/**
+ * Auto-compaction: when the thread crosses COMPACT_AT of the model's window, summarize
+ * the older messages (via fast Arc3Mini) into one dense brief and splice them out, keeping
+ * the system prompt + the most recent messages. Splices IN PLACE so the array reference the
+ * running loop holds stays valid. If summarization fails, we leave the thread (trim backstops).
+ */
+async function maybeCompact(model: ArcModelId, signal?: AbortSignal): Promise<void> {
+  if (!conversation || conversation.length < 12) return
+  const window = ARC_MODELS[model].contextWindow
+  if (conversationTokens() < window * COMPACT_AT) return
+
+  const KEEP = 10
+  let cut = Math.max(1, conversation.length - KEEP)
+  while (cut < conversation.length && conversation[cut].role === 'tool') cut++ // don't orphan a tool result from its call
+  const head = conversation.slice(1, cut)
+  if (head.length < 4) return
+
+  const transcript = head.map(summarizeMsg).join('\n').slice(0, 120_000)
+  let summary: string
+  try {
+    summary = await chatArc(
+      'arc3mini',
+      [
+        {
+          role: 'system',
+          content:
+            "You compact a coding session so another AI can continue it seamlessly. Output a dense brief: the user's goal, key decisions, every file created/edited and its purpose, commands run and their results, the current state, and what still remains. Preserve ALL concrete names (files, functions, paths, commands). No preamble, no fluff.",
+        },
+        { role: 'user', content: transcript },
+      ],
+      { maxTokens: 1400, reasoning: false, temperature: 0.2, signal },
+    )
+  } catch {
+    return // leave the thread as-is; trimConversation still caps it
+  }
+  if (!summary.trim()) return
+
+  conversation.splice(1, head.length, {
+    role: 'user',
+    content: `[Earlier conversation compacted to fit context — summary of what happened so far]\n\n${summary.trim()}`,
+  })
+  const st = useArc.getState()
+  st.resetContext()
+  st.addContext(conversationTokens())
+  st.setToast('Compacted earlier context to keep Arc sharp')
 }
 
 export function stopTurn(): void {
@@ -226,6 +297,10 @@ async function agentSteps(messages: ToolMsg[], model: ArcModelId, eff: EffortCon
 
   for (let iter = 0; iter < iterBudget; iter++) {
     if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+
+    // Keep the thread under the model's window before each request (summarize older turns
+    // once past ~70% full) — m2.7 is only ~200K and forgets past that.
+    await maybeCompact(model, signal)
 
     // Timeline items are created lazily — only when text/reasoning actually streams —
     // so prose-free tool turns don't leave empty "Thinking" bubbles behind.
@@ -393,6 +468,10 @@ export async function runTurn(userText: string, images: string[] = [], attachmen
   store.pushTimeline({ kind: 'user', text: userText, images: images.length ? images : undefined })
   conversation.push({ role: 'user', content: userContent })
   const messages: ToolMsg[] = conversation
+  // Meter reflects the REAL thread size (not cumulative stream), so the fill % is meaningful
+  // for the ~70% auto-compaction and visibly drops when a compaction runs.
+  store.resetContext()
+  store.addContext(conversationTokens())
 
   controller = new AbortController()
   const signal = controller.signal

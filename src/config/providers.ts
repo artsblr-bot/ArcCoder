@@ -44,14 +44,22 @@ export const ARC_MODELS: Record<ArcModelId, ArcModel> = {
     // healthy same-family drop-in (identical reasoning/API shape). Swap back if m3 recovers.
     model: 'minimaxai/minimax-m2.7',
     base: NIM_BASE,
-    contextWindow: 1_000_000,
-    contextLabel: '1M',
-    multimodal: true,
-    blurb: 'Deep reasoning and long-context power — for builds, refactors, and hard problems.',
+    contextWindow: 204_800, // m2.7 is ~200K, NOT 1M like m3 — drives the meter + auto-compaction
+    contextLabel: '~200K',
+    multimodal: false, // m2.7 is text-only (m3 was multimodal); see VISION_MODEL below
+    blurb: 'Deeper reasoning for big builds, refactors, and genuinely hard problems.',
   },
 }
 
 export const DEFAULT_MODEL: ArcModelId = 'arc3mini'
+
+// The model to send image input to, if any is currently vision-capable — else null.
+// Right now NO model is multimodal (Arc3Mini/GLM is text-only; Arc3Ultra/m2.7 is too),
+// so image attach is hidden in the UI. Flip a model's `multimodal` flag and this — plus
+// the composer's attach button and the router's image routing — re-enables automatically.
+export const VISION_MODEL: ArcModelId | null =
+  (Object.keys(ARC_MODELS) as ArcModelId[]).find((id) => ARC_MODELS[id].multimodal) ?? null
+export const HAS_VISION = VISION_MODEL !== null
 
 export function arcModel(id: ArcModelId): ArcModel {
   return ARC_MODELS[id]

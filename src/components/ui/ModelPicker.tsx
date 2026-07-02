@@ -5,9 +5,9 @@ import { useArc } from '../../store/arc'
 import { ARC_MODELS, type ArcModelId } from '../../config/providers'
 import { runTurn } from '../../services/agentLoop'
 
-const CARDS: { id: ArcModelId; tag: string; icon: typeof Zap; note?: string }[] = [
+const CARDS: { id: ArcModelId; tag: string; icon: typeof Zap }[] = [
   { id: 'arc3mini', tag: 'Fast', icon: Zap },
-  { id: 'arc3ultra', tag: 'Deep', icon: Sparkles, note: 'Understands images' },
+  { id: 'arc3ultra', tag: 'Deep', icon: Sparkles },
 ]
 
 /**
@@ -82,8 +82,9 @@ export function ModelPicker() {
             </div>
 
             <div className="grid gap-3 p-6 sm:grid-cols-2">
-              {CARDS.map(({ id, tag, icon: Icon, note }) => {
+              {CARDS.map(({ id, tag, icon: Icon }) => {
                 const m = ARC_MODELS[id]
+                const note = m.multimodal ? 'Understands images' : null
                 return (
                   <button
                     key={id}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Send, Square, Paperclip, X, Hammer, MessageCircleQuestion, ClipboardList, Cpu, Gauge, File as FileIcon } from 'lucide-react'
 import { useArc } from '../../store/arc'
-import { ARC_MODELS } from '../../config/providers'
+import { ARC_MODELS, HAS_VISION } from '../../config/providers'
 import type { ArcModelId } from '../../config/providers'
 import type { AgentMode } from '../../config/prompts'
 import { runTurn, stopTurn } from '../../services/agentLoop'
@@ -12,7 +12,7 @@ import { Menu, type MenuOption } from '../ui/Menu'
 
 const MODEL_OPTS: MenuOption[] = [
   { value: 'arc3mini', label: 'Arc3Mini', hint: 'Fast — quick edits, answers, small changes' },
-  { value: 'arc3ultra', label: 'Arc3Ultra', hint: 'Deep — big builds, refactors, long context' },
+  { value: 'arc3ultra', label: 'Arc3Ultra', hint: 'Deep — big builds, refactors, hard problems' },
 ]
 const MODE_OPTS: MenuOption[] = [
   { value: 'build', label: 'Build', hint: 'Arc edits files and runs commands' },
@@ -215,21 +215,27 @@ export function Composer() {
           className="w-full resize-none bg-transparent px-3.5 py-3 text-[14px] leading-relaxed text-ink outline-none placeholder:text-muted"
         />
         <div className="flex items-center justify-end gap-1.5 px-2 pb-2">
-          <button onClick={() => fileRef.current?.click()} className="rounded-lg p-2 text-muted transition hover:bg-surface-2 hover:text-ink" title="Attach an image">
-            <Paperclip size={16} />
-          </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={(e) => {
-              const files = Array.from(e.target.files ?? [])
-              void Promise.all(files.map(toDataURL)).then((urls) => setImages((p) => [...p, ...urls]))
-              e.target.value = ''
-            }}
-          />
+          {/* Image attach only appears when a vision-capable model is configured
+              (none right now — m2.7 and GLM are text-only). Auto-returns if one is. */}
+          {HAS_VISION && (
+            <>
+              <button onClick={() => fileRef.current?.click()} className="rounded-lg p-2 text-muted transition hover:bg-surface-2 hover:text-ink" title="Attach an image">
+                <Paperclip size={16} />
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? [])
+                  void Promise.all(files.map(toDataURL)).then((urls) => setImages((p) => [...p, ...urls]))
+                  e.target.value = ''
+                }}
+              />
+            </>
+          )}
           {running ? (
             <button onClick={stopTurn} className="flex items-center gap-1.5 rounded-lg bg-danger/15 px-3 py-2 text-[13px] font-medium text-danger transition hover:bg-danger/25">
               <Square size={14} /> Stop
