@@ -267,8 +267,10 @@ export async function streamArcTurn(
   let repeatRun = 0
   const feedDegen = (d: string) => {
     const t = d.trim()
-    if (t && t.length <= 8 && t === prevFrag) {
-      if (++repeatRun >= 80) degenerate = true
+    // Catch a short-to-medium fragment repeating over and over (the classic collapse,
+    // e.g. "/> "/> … or repeated tag fragments like </parameter>/index.html).
+    if (t && t.length <= 24 && t === prevFrag) {
+      if (++repeatRun >= 60) degenerate = true
     } else {
       prevFrag = t
       repeatRun = 0
@@ -451,6 +453,32 @@ export function extractInlineToolCalls(text: string, validNames?: Set<string>): 
       if (!m[0].endsWith('</function>')) break
     }
     if (calls.length) return { calls, cleanText: text.slice(0, bStart).trim() }
+  }
+
+  // Dialect D: MiniMax/Anthropic-style <invoke name="NAME"><parameter name="P">VALUE</parameter></invoke>,
+  // usually wrapped in <minimax:tool_call>…</minimax:tool_call>. This is what m2.7 emits as TEXT
+  // instead of native tool_calls (seen in the wild with thinking on / larger builds) — if we
+  // don't parse it, the call never runs and the model spirals into degenerate output.
+  const dStart = text.search(/<minimax:tool_call>|<invoke\s+name=/)
+  if (dStart >= 0) {
+    const calls: ToolCall[] = []
+    const invRe = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)(?:<\/invoke>|$)/g
+    let im: RegExpExecArray | null
+    while ((im = invRe.exec(text))) {
+      const name = im[1].trim()
+      const body = im[2]
+      const args: Record<string, unknown> = {}
+      const pRe = /<parameter\s+name="([^"]+)"\s*>\n?([\s\S]*?)(?:\n?<\/parameter>|$)/g
+      let pm: RegExpExecArray | null
+      while ((pm = pRe.exec(body))) {
+        const raw = pm[2].trim()
+        const parsed = parseLooseJson(raw)
+        args[pm[1].trim()] = parsed !== null ? parsed : raw
+      }
+      if (name) calls.push({ id: `inline-${i++}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })
+      if (!im[0].endsWith('</invoke>')) break
+    }
+    if (calls.length) return { calls, cleanText: text.slice(0, dStart).trim() }
   }
 
   // Dialect C: a JSON array/object of tool calls emitted as plain text (MiniMax on NIM),
