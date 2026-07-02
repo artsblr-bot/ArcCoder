@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, useSpring, useReducedMotion } from 'framer-motion'
 import { Arcy } from './Arcy'
-import { useArc } from '../../store/arc'
+import { useArc, type ArcyState } from '../../store/arc'
 import { getPanelRect } from './panelRegistry'
 
 const SIZE = 96
@@ -9,11 +9,44 @@ const SIZE = 96
 /** Arcy travels to the active panel while working; strolls to random spots while
  *  thinking/idle, watches the cursor, and bolts away (startled) if it gets too close. */
 export function ArcyRoamer() {
-  const activity = useArc((s) => s.arcy.activity)
-  const target = useArc((s) => s.arcy.target)
+  // Arcy's shown activity/target are driven through a DWELL QUEUE (below) rather than the
+  // raw store value, so Arcy is actually *seen* working at each panel — even when the model
+  // fires tools in a fast burst (m2.7 delivers a whole tool call in one chunk after a long
+  // think), which otherwise flips the target away before the spring can arrive.
+  const [disp, setDisp] = useState<ArcyState>(() => useArc.getState().arcy)
+  const activity = disp.activity
+  const target = disp.target
+  const queueRef = useRef<ArcyState[]>([])
+  const busyRef = useRef(false)
   const costume = useArc((s) => s.costume)
   const view = useArc((s) => s.view)
   const reduce = useReducedMotion()
+
+  // Every setArcy change is queued and shown for a minimum dwell so quick tools
+  // (read_file→explorer, search→agent, …) are visible, not just write/terminal.
+  useEffect(() => {
+    const drain = () => {
+      if (busyRef.current) return
+      const next = queueRef.current.shift()
+      if (!next) return
+      busyRef.current = true
+      setDisp(next)
+      const rest = next.activity === 'idle' || next.activity === 'thinking'
+      // Work states dwell so Arcy is seen there; rest states don't block; drain faster when backed up.
+      const hold = rest ? 140 : queueRef.current.length > 3 ? 320 : 820
+      window.setTimeout(() => {
+        busyRef.current = false
+        drain()
+      }, hold)
+    }
+    const unsub = useArc.subscribe((state, prev) => {
+      if (state.arcy !== prev.arcy) {
+        queueRef.current.push(state.arcy)
+        drain()
+      }
+    })
+    return unsub
+  }, [])
 
   const startX = typeof window !== 'undefined' ? window.innerWidth - SIZE - 24 : 0
   const x = useSpring(startX, { stiffness: 80, damping: 16, mass: 0.9 })
